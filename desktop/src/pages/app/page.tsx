@@ -1,0 +1,33 @@
+import { useState, useCallback } from 'react';
+import { useParams } from 'react-router-dom';
+import Sidebar from './components/Sidebar';
+import ScanView from './components/ScanView';
+import ResultsView from './components/ResultsView';
+import FiltersView from './components/FiltersView';
+import SettingsView from './components/SettingsView';
+import CompareView from './components/CompareView';
+
+export default function AppPage() {
+  const [activeTab, setActiveTab] = useState('scan');
+  const { groupId } = useParams();
+
+  const handleNavigateToResults = useCallback(() => {
+    setActiveTab('results');
+  }, []);
+
+  const views: Record<string, React.ReactNode> = {
+    scan: <ScanView onNavigateToResults={handleNavigateToResults} />,
+    results: <ResultsView />,
+    filters: <FiltersView />,
+    settings: <SettingsView />,
+  };
+
+  return (
+    <div className="h-screen w-full flex bg-[#1f1008] overflow-hidden">
+      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+      <main className="flex-1 overflow-y-auto p-5 md:p-8 pb-10 md:pb-16">
+        {groupId ? <CompareView /> : views[activeTab]}
+      </main>
+    </div>
+  );
+}
