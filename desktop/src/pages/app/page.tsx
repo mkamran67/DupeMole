@@ -16,9 +16,13 @@ export default function AppPage() {
     setActiveTab('results');
   }, []);
 
+  const handleNavigateToScan = useCallback(() => {
+    setActiveTab('scan');
+  }, []);
+
   const views: Record<string, React.ReactNode> = {
     scan: <ScanView onNavigateToResults={handleNavigateToResults} />,
-    results: <ResultsView />,
+    results: <ResultsView onNavigateToScan={handleNavigateToScan} />,
     filters: <FiltersView />,
     settings: <SettingsView />,
     about: <AboutView />,

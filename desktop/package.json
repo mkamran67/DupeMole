@@ -11,6 +11,8 @@
     "type-check": "tsc --noEmit --project tsconfig.app.json"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
     "i18next": "^25.3.2",
     "react": "^19.1.2",
     "react-dom": "^19.1.2",

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useSettings, type AppSettings, type ScanThreads } from '../../../settings/SettingsContext';
 
 interface SettingItem {
   id: string;
@@ -79,20 +79,44 @@ const settings: SettingItem[] = [
   },
 ];
 
+const idToKey: Record<string, keyof AppSettings> = {
+  'confirm-delete': 'confirmDelete',
+  'move-to-trash': 'moveToTrash',
+  'scan-threads': 'scanThreads',
+  'notifications': 'notifications',
+  'ignore-hidden': 'ignoreHidden',
+  'auto-scan': 'autoScan',
+  'minimize-tray': 'minimizeTray',
+  'language': 'language',
+};
+
+function scanThreadsToString(v: ScanThreads): string {
+  return v === 'Auto' ? 'Auto' : String(v.N);
+}
+
+function stringToScanThreads(s: string): ScanThreads {
+  return s === 'Auto' ? 'Auto' : { N: parseInt(s, 10) };
+}
+
 export default function SettingsView() {
-  const [values, setValues] = useState<Record<string, boolean | string>>(
-    Object.fromEntries(settings.map((s) => [s.id, s.default]))
-  );
+  const { settings: values, updateSettings } = useSettings();
+
+  const readValue = (id: string): boolean | string => {
+    const key = idToKey[id];
+    const raw = values[key];
+    if (key === 'scanThreads') return scanThreadsToString(raw as ScanThreads);
+    return raw as boolean | string;
+  };
 
   const toggleValue = (id: string) => {
-    setValues((prev) => ({
-      ...prev,
-      [id]: !prev[id],
-    }));
+    const key = idToKey[id];
+    updateSettings({ [key]: !values[key] } as Partial<AppSettings>);
   };
 
   const setDropdown = (id: string, val: string) => {
-    setValues((prev) => ({ ...prev, [id]: val }));
+    const key = idToKey[id];
+    const next = key === 'scanThreads' ? stringToScanThreads(val) : val;
+    updateSettings({ [key]: next } as Partial<AppSettings>);
   };
 
   return (
@@ -122,19 +146,19 @@ export default function SettingsView() {
                   <button
                     onClick={() => toggleValue(setting.id)}
                     className={`relative w-12 h-7 rounded-full transition-colors duration-300 cursor-pointer ${
-                      values[setting.id] ? 'bg-[#f5c542]' : 'bg-white/10'
+                      readValue(setting.id) ? 'bg-[#f5c542]' : 'bg-white/10'
                     }`}
                   >
                     <div
                       className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
-                        values[setting.id] ? 'translate-x-6' : 'translate-x-1'
+                        readValue(setting.id) ? 'translate-x-6' : 'translate-x-1'
                       }`}
                     />
                   </button>
                 ) : (
                   <div className="relative">
                     <select
-                      value={values[setting.id] as string}
+                      value={readValue(setting.id) as string}
                       onChange={(e) => setDropdown(setting.id, e.target.value)}
                       className="w-full text-sm px-3 py-2.5 rounded-lg border border-white/10 bg-white/5 text-white focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200 appearance-none cursor-pointer"
                     >

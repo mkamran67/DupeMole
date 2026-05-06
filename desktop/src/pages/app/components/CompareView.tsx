@@ -1,13 +1,29 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { duplicateGroups } from '@/mocks/scanResults';
+import { useResults } from '../../../results/ResultsContext';
+import { toUiGroup } from '../../../results/adapter';
+import { useDelete } from '../../../results/useDelete';
 
 export default function CompareView() {
   const { groupId } = useParams();
   const navigate = useNavigate();
-  const group = duplicateGroups.find((g) => g.id === groupId);
+  const { latestScan, loaded } = useResults();
+  const { deleting, deleteFiles, lastFailures } = useDelete();
+
+  const group = useMemo(() => {
+    const raw = latestScan?.groups.find((g) => g.id === groupId);
+    return raw ? toUiGroup(raw) : null;
+  }, [latestScan, groupId]);
 
   const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  if (!loaded) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <p className="text-white/40 text-sm">Loading...</p>
+      </div>
+    );
+  }
 
   if (!group) {
     return (
@@ -28,6 +44,7 @@ export default function CompareView() {
   const duplicates = group.files.slice(1);
   const originalCount = 1;
   const duplicateCount = duplicates.length;
+  const isImageGroup = group.type === 'Images';
 
   const toggleSelect = (idx: number) => {
     setSelected((prev) => {
@@ -41,24 +58,33 @@ export default function CompareView() {
     });
   };
 
-  const selectAllNewer = () => {
-    const allNewer = new Set(duplicates.map((_, i) => i + 1));
-    setSelected(allNewer);
+  const selectAllDuplicates = () => {
+    setSelected(new Set(duplicates.map((_, i) => i + 1)));
   };
 
-  const selectAllOlder = () => {
-    const allOlder = new Set([0]);
-    setSelected(allOlder);
+  const selectAllOriginal = () => {
+    setSelected(new Set([0]));
   };
 
   const clearAll = () => setSelected(new Set());
 
   const handleKeepSelected = () => {
-    clearAll();
+    // Invert the selection: keep what's selected, mark the rest for deletion.
+    const inverted = new Set<number>();
+    group.files.forEach((_, i) => {
+      if (!selected.has(i)) inverted.add(i);
+    });
+    setSelected(inverted);
   };
 
-  const handleDeleteSelected = () => {
-    clearAll();
+  const handleDeleteSelected = async () => {
+    const paths = [...selected].map((i) => group.files[i]?.path).filter((p): p is string => Boolean(p));
+    const result = await deleteFiles(paths, false);
+    if (result.deleted.length > 0) {
+      // After pruning, the group may shrink or disappear; navigate back if so.
+      clearAll();
+      navigate('/app');
+    }
   };
 
   return (
@@ -66,7 +92,7 @@ export default function CompareView() {
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-white text-2xl font-bold tracking-tight">Compare Images</h2>
+          <h2 className="text-white text-2xl font-bold tracking-tight">Compare {group.type}</h2>
           <p className="text-white/40 text-sm mt-1">
             {group.files.length} copies of <span className="text-white/60">{original.name}</span>
           </p>
@@ -83,14 +109,14 @@ export default function CompareView() {
       {/* Bulk Select Bar */}
       <div className="flex items-center gap-3 mb-5">
         <button
-          onClick={selectAllOlder}
+          onClick={selectAllOriginal}
           className="inline-flex items-center gap-1.5 text-white/60 hover:text-white text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 rounded-full px-3 py-1.5 transition-all duration-200 cursor-pointer"
         >
           <i className="ri-star-line"></i>
-          Select All Original ({originalCount})
+          Select Original ({originalCount})
         </button>
         <button
-          onClick={selectAllNewer}
+          onClick={selectAllDuplicates}
           className="inline-flex items-center gap-1.5 text-white/60 hover:text-white text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 rounded-full px-3 py-1.5 transition-all duration-200 cursor-pointer"
         >
           <i className="ri-file-copy-line"></i>
@@ -121,7 +147,6 @@ export default function CompareView() {
                 : 'border-white/10 hover:border-white/25'
             }`}
           >
-            {/* Selection indicator */}
             <div
               className={`absolute top-3 right-3 z-10 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all duration-200 ${
                 selected.has(0)
@@ -132,33 +157,40 @@ export default function CompareView() {
               {selected.has(0) && <i className="ri-check-line text-white text-xs"></i>}
             </div>
 
-            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-emerald-500/20 flex items-center justify-center">
+            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-6 h-6 rounded-full bg-emerald-500/20 flex items-center justify-center shrink-0">
                   <i className="ri-star-fill text-emerald-400 text-xs"></i>
                 </div>
                 <span className="text-white text-sm font-semibold">Original</span>
               </div>
-              <span className="text-white/30 text-xs font-mono">{original.path}{original.name}</span>
+              <span className="text-white/30 text-xs font-mono truncate" title={original.path}>{original.path}</span>
             </div>
-            <div className="flex-1 p-5 flex items-center justify-center bg-[#2a160e]">
-              {original.imageUrl ? (
+            <div className="flex-1 p-5 flex items-center justify-center bg-[#2a160e] min-h-[240px]">
+              {isImageGroup ? (
                 <img
-                  src={original.imageUrl}
+                  src={original.assetUrl}
                   alt={original.name}
                   className="max-w-full max-h-[60vh] object-contain rounded-xl"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = 'none';
+                  }}
                 />
               ) : (
                 <div className="text-center">
-                  <i className="ri-image-line text-white/20 text-4xl"></i>
+                  <i className={`${original.icon} text-white/20 text-4xl`}></i>
                   <p className="text-white/30 text-xs mt-2">No preview available</p>
                 </div>
               )}
             </div>
             <div className="px-5 py-3 border-t border-white/10 flex items-center gap-4 text-white/40 text-xs">
-              <span>{original.size}</span>
-              <span>&bull;</span>
-              <span>{original.date}</span>
+              <span>{original.formattedSize}</span>
+              {original.formattedDate && (
+                <>
+                  <span>&bull;</span>
+                  <span>{original.formattedDate}</span>
+                </>
+              )}
             </div>
           </div>
 
@@ -168,7 +200,7 @@ export default function CompareView() {
             const isSelected = selected.has(realIdx);
             return (
               <div
-                key={realIdx}
+                key={dup.path}
                 onClick={() => toggleSelect(realIdx)}
                 className={`relative bg-[#3d2418] rounded-2xl border overflow-hidden flex flex-col cursor-pointer transition-all duration-200 ${
                   isSelected
@@ -176,7 +208,6 @@ export default function CompareView() {
                     : 'border-white/10 hover:border-white/25'
                 }`}
               >
-                {/* Selection indicator */}
                 <div
                   className={`absolute top-3 right-3 z-10 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all duration-200 ${
                     isSelected
@@ -187,39 +218,58 @@ export default function CompareView() {
                   {isSelected && <i className="ri-check-line text-white text-xs"></i>}
                 </div>
 
-                <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 rounded-full bg-[#c45c5c]/20 flex items-center justify-center">
+                <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-6 h-6 rounded-full bg-[#c45c5c]/20 flex items-center justify-center shrink-0">
                       <i className="ri-file-copy-line text-[#c45c5c] text-xs"></i>
                     </div>
                     <span className="text-white text-sm font-semibold">Duplicate #{idx + 1}</span>
                   </div>
-                  <span className="text-white/30 text-xs font-mono">{dup.path}{dup.name}</span>
+                  <span className="text-white/30 text-xs font-mono truncate" title={dup.path}>{dup.path}</span>
                 </div>
-                <div className="flex-1 p-5 flex items-center justify-center bg-[#2a160e]">
-                  {dup.imageUrl ? (
+                <div className="flex-1 p-5 flex items-center justify-center bg-[#2a160e] min-h-[240px]">
+                  {isImageGroup ? (
                     <img
-                      src={dup.imageUrl}
+                      src={dup.assetUrl}
                       alt={dup.name}
                       className="max-w-full max-h-[60vh] object-contain rounded-xl"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.display = 'none';
+                      }}
                     />
                   ) : (
                     <div className="text-center">
-                      <i className="ri-image-line text-white/20 text-4xl"></i>
+                      <i className={`${dup.icon} text-white/20 text-4xl`}></i>
                       <p className="text-white/30 text-xs mt-2">No preview available</p>
                     </div>
                   )}
                 </div>
                 <div className="px-5 py-3 border-t border-white/10 flex items-center gap-4 text-white/40 text-xs">
-                  <span>{dup.size}</span>
-                  <span>&bull;</span>
-                  <span>{dup.date}</span>
+                  <span>{dup.formattedSize}</span>
+                  {dup.formattedDate && (
+                    <>
+                      <span>&bull;</span>
+                      <span>{dup.formattedDate}</span>
+                    </>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
       </div>
+
+      {/* Failures banner */}
+      {lastFailures.length > 0 && (
+        <div className="mt-4 mx-auto max-w-md bg-[#c45c5c]/10 border border-[#c45c5c]/20 rounded-xl p-3">
+          <div className="flex items-start gap-2">
+            <i className="ri-error-warning-line text-[#c45c5c] text-base mt-0.5"></i>
+            <p className="text-[#c45c5c] text-sm font-medium">
+              {lastFailures.length} file{lastFailures.length !== 1 ? 's' : ''} could not be deleted
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Action Bar */}
       {selected.size > 0 && (
@@ -231,15 +281,24 @@ export default function CompareView() {
             <div className="w-px h-4 bg-white/10" />
             <button
               onClick={handleKeepSelected}
-              className="text-white/60 text-xs font-semibold hover:text-white transition-colors duration-200 whitespace-nowrap cursor-pointer"
+              disabled={deleting}
+              className="text-white/60 text-xs font-semibold hover:text-white transition-colors duration-200 whitespace-nowrap cursor-pointer disabled:opacity-30"
             >
-              Keep Selected
+              Invert Selection
             </button>
             <button
               onClick={handleDeleteSelected}
-              className="text-sm font-semibold px-4 py-2 rounded-full transition-colors duration-200 whitespace-nowrap cursor-pointer bg-[#c45c5c] text-white hover:bg-[#b05050]"
+              disabled={deleting}
+              className="text-sm font-semibold px-4 py-2 rounded-full transition-colors duration-200 whitespace-nowrap cursor-pointer bg-[#c45c5c] text-white hover:bg-[#b05050] disabled:opacity-50"
             >
-              Delete Selected
+              {deleting ? (
+                <span className="flex items-center gap-1.5">
+                  <i className="ri-loader-4-line animate-spin"></i>
+                  Deleting...
+                </span>
+              ) : (
+                'Move to Trash'
+              )}
             </button>
           </div>
         </div>

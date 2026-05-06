@@ -1,22 +1,75 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { duplicateGroups } from '@/mocks/scanResults';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { useSettings } from '../../../settings/SettingsContext';
+import { useResults } from '../../../results/ResultsContext';
+import {
+  FILTER_TYPE_PRESETS,
+  SCAN_VIEW_BUCKETS,
+  buildExtensionAllowlist,
+  deriveActiveTypeIds,
+} from '../../../settings/filterPresets';
+import { formatBytes, basename } from '../../../lib/format';
 
 interface ScanViewProps {
   onNavigateToResults?: () => void;
 }
 
-const mockDirectories = [
-  { id: 1, name: '/Users/Photos', files: 4728, progress: 100, scanned: true },
-  { id: 2, name: '/Users/Downloads', files: 2103, progress: 65, scanned: false },
-  { id: 3, name: '/Users/Documents', files: 891, progress: 32, scanned: false },
-];
+interface Directory {
+  id: number;
+  name: string;
+  path: string;
+  files: number;
+  progress: number;
+  scanned: boolean;
+}
 
-const fileTypeStats = [
-  { icon: 'ri-image-line', label: 'Images', count: '1,240', formats: 'JPG, PNG, WebP, RAW', color: '#f5c542' },
-  { icon: 'ri-video-line', label: 'Videos', count: '86', formats: 'MP4, MOV, MKV, AVI', color: '#f5c542' },
-  { icon: 'ri-file-pdf-line', label: 'PDFs', count: '402', formats: 'PDF, DOCX, TXT', color: '#f5c542' },
-  { icon: 'ri-music-line', label: 'Audio', count: '1,033', formats: 'MP3, FLAC, WAV', color: '#f5c542' },
-];
+interface ScanProgressEvent {
+  scanId: string;
+  progress: {
+    processed: number;
+    total: number;
+    currentPath: string | null;
+    phase: 'walking' | 'hashing';
+  };
+}
+
+interface BackendDuplicateGroup {
+  id: string;
+  hash: string;
+  size: number;
+  hashKind: 'full' | 'partial';
+  files: { path: string; size: number; modifiedMs: number | null }[];
+}
+
+interface ScanCompleteEvent {
+  scanId: string;
+  result: {
+    groups: BackendDuplicateGroup[];
+    totalFiles: number;
+    duplicateFiles: number;
+    wastedBytes: number;
+    extensionCounts: Record<string, number>;
+  };
+}
+
+
+function bucketFormatsLabel(id: string): string {
+  const preset = FILTER_TYPE_PRESETS.find((p) => p.id === id);
+  if (!preset) return '';
+  return preset.formats.slice(0, 4).join(', ');
+}
+
+function countBucketHits(
+  bucketId: string,
+  extensionCounts: Record<string, number> | null,
+): number {
+  if (!extensionCounts) return 0;
+  const preset = FILTER_TYPE_PRESETS.find((p) => p.id === bucketId);
+  if (!preset) return 0;
+  return preset.formats.reduce((sum, f) => sum + (extensionCounts[f.toLowerCase()] ?? 0), 0);
+}
 
 /* ------------------------------------------------------------------ */
 /*  MoleScene — mole emerges from / sinks into its burrow hole        */
@@ -355,11 +408,19 @@ function ScanCompleteModal({
 }
 
 export default function ScanView({ onNavigateToResults }: ScanViewProps) {
+  const { settings, updateFilters } = useSettings();
+  const { setLatestScan } = useResults();
+  const activeTypeIds = useMemo(
+    () => deriveActiveTypeIds(settings.filters.extensions),
+    [settings.filters.extensions]
+  );
+
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [directories, setDirectories] = useState(mockDirectories);
+  const [directories, setDirectories] = useState<Directory[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [scanComplete, setScanComplete] = useState(false);
+  const [extensionCounts, setExtensionCounts] = useState<Record<string, number> | null>(null);
   const [scanStats, setScanStats] = useState({
     totalFiles: 0,
     duplicateGroups: 0,
@@ -368,19 +429,40 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
     scanTime: '',
   });
   const scanStartTime = useRef<number>(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeScanId = useRef<string | null>(null);
 
-  const addDirectory = (name: string) => {
-    setDirectories((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        name,
-        files: Math.floor(Math.random() * 3000) + 500,
-        progress: 0,
-        scanned: false,
-      },
-    ]);
+  const toggleQuickFilter = (id: string) => {
+    const next = activeTypeIds.includes(id)
+      ? activeTypeIds.filter((t) => t !== id)
+      : [...activeTypeIds, id];
+    const list = buildExtensionAllowlist(next, '');
+    updateFilters({ extensions: list });
+  };
+
+  const cancelScan = useCallback(async () => {
+    if (!activeScanId.current) return;
+    try {
+      await invoke('cancel_scan', { scanId: activeScanId.current });
+    } catch (err) {
+      console.error('cancel_scan failed', err);
+    }
+  }, []);
+
+  const addDirectory = (path: string) => {
+    setDirectories((prev) => {
+      if (prev.some((d) => d.path === path)) return prev;
+      return [
+        ...prev,
+        {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          name: basename(path),
+          path,
+          files: 0,
+          progress: 0,
+          scanned: false,
+        },
+      ];
+    });
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -399,73 +481,106 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    const items = e.dataTransfer.items;
-    if (items && items.length > 0) {
-      const entry = items[0].webkitGetAsEntry?.();
-      if (entry && entry.isDirectory) {
-        addDirectory(entry.name);
-        return;
-      }
-    }
-    addDirectory('Dropped Folder');
+    // Browser drag-drop cannot resolve absolute filesystem paths; users must use Browse.
   }, []);
 
-  const handleBrowse = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    const firstPath = files[0].webkitRelativePath || '';
-    const folderName = firstPath.split('/')[0] || 'Selected Folder';
-    addDirectory(folderName);
-    e.target.value = '';
-  };
+  const handleBrowse = useCallback(async () => {
+    try {
+      const selected = await openDialog({ directory: true, multiple: true });
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      paths.forEach((p) => addDirectory(p));
+    } catch (err) {
+      console.error('folder picker failed', err);
+    }
+  }, []);
 
   const removeDirectory = (id: number) => {
     setDirectories((prev) => prev.filter((d) => d.id !== id));
   };
 
-  const startScan = useCallback(() => {
+  const startScan = useCallback(async () => {
+    if (directories.length === 0) return;
     setScanning(true);
     setProgress(0);
     setScanComplete(false);
-    setDirectories(mockDirectories.map((d) => ({ ...d, progress: 0, scanned: false })));
+    setExtensionCounts(null);
+    setDirectories((prev) => prev.map((d) => ({ ...d, progress: 0, scanned: false, files: 0 })));
     scanStartTime.current = Date.now();
 
-    let p = 0;
-    const interval = setInterval(() => {
-      p += Math.random() * 4 + 1;
-      if (p >= 100) {
-        p = 100;
-        clearInterval(interval);
-        const elapsed = ((Date.now() - scanStartTime.current) / 1000).toFixed(1);
-        const totalFiles = directories.reduce((sum, d) => sum + d.files, 0);
-        const dupGroups = duplicateGroups.length;
-        const dupFiles = duplicateGroups.reduce((sum, g) => sum + g.count, 0);
-        setScanStats({
-          totalFiles,
-          duplicateGroups: dupGroups,
-          duplicateFiles: dupFiles,
-          wastedSize: '1.26 GB',
-          scanTime: `${elapsed}s`,
-        });
-        setScanComplete(true);
-        setScanning(false);
-        setDirectories((prev) =>
-          prev.map((d) => ({ ...d, progress: 100, scanned: true }))
-        );
-      }
-      setProgress(Math.min(p, 100));
+    const scanId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    activeScanId.current = scanId;
+    try {
+      await invoke<string>('start_scan', {
+        paths: directories.map((d) => d.path),
+        scanId,
+      });
+    } catch (err) {
+      console.error('start_scan failed', err);
+      activeScanId.current = null;
+      setScanning(false);
+    }
+  }, [directories]);
+
+  useEffect(() => {
+    let unlistenProgress: UnlistenFn | undefined;
+    let unlistenComplete: UnlistenFn | undefined;
+
+    listen<ScanProgressEvent>('scan://progress', (e) => {
+      if (e.payload.scanId !== activeScanId.current) return;
+      const { processed, total, phase } = e.payload.progress;
+      const pct =
+        phase === 'walking' ? 5 : total === 0 ? 100 : 5 + (processed / total) * 95;
+      const clamped = Math.min(99, pct);
+      setProgress(clamped);
+      setDirectories((prev) => prev.map((d) => ({ ...d, progress: clamped })));
+    }).then((u) => (unlistenProgress = u));
+
+    listen<ScanCompleteEvent>('scan://complete', (e) => {
+      if (e.payload.scanId !== activeScanId.current) return;
+      const { result } = e.payload;
+      const elapsed = ((Date.now() - scanStartTime.current) / 1000).toFixed(1);
+      setScanStats({
+        totalFiles: result.totalFiles,
+        duplicateGroups: result.groups.length,
+        duplicateFiles: result.duplicateFiles,
+        wastedSize: formatBytes(result.wastedBytes),
+        scanTime: `${elapsed}s`,
+      });
+      const counts = result.extensionCounts ?? {};
+      setExtensionCounts(counts);
+      setLatestScan({
+        groups: result.groups,
+        totalFiles: result.totalFiles,
+        duplicateFiles: result.duplicateFiles,
+        wastedBytes: result.wastedBytes,
+        extensionCounts: counts,
+      });
+      // Tally per-directory file counts from the path roots.
       setDirectories((prev) =>
-        prev.map((d, i) => {
-          const dirProg = Math.min(Math.max((p - i * 25) * 1.5, 0), 100);
-          return { ...d, progress: Math.round(dirProg), scanned: dirProg >= 100 };
+        prev.map((d) => {
+          const matches = result.groups.reduce(
+            (sum, g) => sum + g.files.filter((f) => f.path.startsWith(d.path)).length,
+            0
+          );
+          return { ...d, progress: 100, scanned: true, files: matches };
         })
       );
-    }, 120);
-  }, [directories]);
+      console.info('[scan] complete', result);
+      setProgress(100);
+      setScanning(false);
+      setScanComplete(true);
+      activeScanId.current = null;
+    }).then((u) => (unlistenComplete = u));
+
+    return () => {
+      unlistenProgress?.();
+      unlistenComplete?.();
+    };
+  }, []);
 
   const handleGoToResults = () => {
     setScanComplete(false);
@@ -547,18 +662,28 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
           <h2 className="text-white text-2xl font-bold tracking-tight">Scan</h2>
           <p className="text-white/40 text-sm mt-1">Select directories to scan for duplicate files</p>
         </div>
-        <button
-          onClick={startScan}
-          disabled={scanning || directories.length === 0}
-          className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 cursor-pointer whitespace-nowrap ${
-            scanning || directories.length === 0
-              ? 'bg-white/10 text-white/30 cursor-not-allowed'
-              : 'bg-[#f5c542] text-[#2c1810] hover:bg-[#e0b038]'
-          }`}
-        >
-          {scanning ? <i className="ri-loader-4-line animate-spin"></i> : <i className="ri-search-line"></i>}
-          {scanning ? 'Scanning...' : 'Start Scan'}
-        </button>
+        {scanning ? (
+          <button
+            onClick={cancelScan}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 cursor-pointer whitespace-nowrap bg-[#c45c5c] text-white hover:bg-[#a84848]"
+          >
+            <i className="ri-stop-circle-line"></i>
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={startScan}
+            disabled={directories.length === 0}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 cursor-pointer whitespace-nowrap ${
+              directories.length === 0
+                ? 'bg-white/10 text-white/30 cursor-not-allowed'
+                : 'bg-[#f5c542] text-[#2c1810] hover:bg-[#e0b038]'
+            }`}
+          >
+            <i className="ri-search-line"></i>
+            Start Scan
+          </button>
+        )}
       </div>
 
       {/* Mole Drop Zone */}
@@ -573,16 +698,6 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
             : 'border-white/15 bg-white/[0.03] hover:border-white/30 hover:bg-white/[0.05]'
         }`}
       >
-        <input
-          ref={fileInputRef}
-          type="file"
-          webkitdirectory=""
-          directory=""
-          multiple
-          className="hidden"
-          onChange={handleFileSelect}
-        />
-
         <MoleScene scanning={scanning} dragActive={dragActive} />
 
         {/* Browse hint overlay */}
@@ -590,6 +705,38 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
           <p className="text-white/30 text-xs">
             {dragActive ? 'Release to add folder' : 'Drag a folder here or click to browse'}
           </p>
+        </div>
+      </div>
+
+      {/* Quick Filters */}
+      <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-white/30 text-xs font-semibold uppercase tracking-wider">Quick Filters</p>
+          <p className="text-white/30 text-[11px]">
+            {settings.filters.extensions === null
+              ? 'All file types'
+              : `${activeTypeIds.length} of ${FILTER_TYPE_PRESETS.length} types`}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {FILTER_TYPE_PRESETS.map((ft) => {
+            const active = activeTypeIds.includes(ft.id);
+            return (
+              <button
+                key={ft.id}
+                onClick={() => toggleQuickFilter(ft.id)}
+                disabled={scanning}
+                className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed ${
+                  active
+                    ? 'border-[#f5c542] bg-[#f5c542]/15 text-[#f5c542]'
+                    : 'border-white/10 text-white/50 hover:border-white/20'
+                }`}
+              >
+                <i className={`${ft.icon} text-sm`}></i>
+                {ft.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -654,21 +801,27 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
 
       {/* File Type Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        {fileTypeStats.map((ft) => (
-          <div
-            key={ft.label}
-            className="bg-[#3d2418] rounded-2xl p-5 border border-white/10 hover:border-[#f5c542]/30 transition-colors duration-200"
-          >
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-9 h-9 rounded-lg bg-[#f5c542]/10 flex items-center justify-center">
-                <i className={`${ft.icon} text-[#f5c542] text-sm`}></i>
+        {SCAN_VIEW_BUCKETS.map((id) => {
+          const preset = FILTER_TYPE_PRESETS.find((p) => p.id === id)!;
+          const count = countBucketHits(id, extensionCounts);
+          return (
+            <div
+              key={id}
+              className="bg-[#3d2418] rounded-2xl p-5 border border-white/10 hover:border-[#f5c542]/30 transition-colors duration-200"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-9 h-9 rounded-lg bg-[#f5c542]/10 flex items-center justify-center">
+                  <i className={`${preset.icon} text-[#f5c542] text-sm`}></i>
+                </div>
+                <span className="text-white text-sm font-medium">{preset.label}</span>
               </div>
-              <span className="text-white text-sm font-medium">{ft.label}</span>
+              <p className="text-white text-xl font-bold">
+                {extensionCounts ? count.toLocaleString() : '—'}
+              </p>
+              <p className="text-white/30 text-xs mt-1">{bucketFormatsLabel(id)}</p>
             </div>
-            <p className="text-white text-xl font-bold">{ft.count}</p>
-            <p className="text-white/30 text-xs mt-1">{ft.formats}</p>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Scan Complete Modal */}

@@ -1,63 +1,91 @@
 import { useMemo, useState, useRef, useEffect } from 'react';
-
-interface FilterType {
-  id: string;
-  icon: string;
-  label: string;
-  formats: string;
-}
-
-const defaultFilterTypes: FilterType[] = [
-  { id: 'images', icon: 'ri-image-line', label: 'Images', formats: 'JPG, PNG, WebP, RAW, HEIC, BMP, TIFF, GIF, SVG, AVIF' },
-  { id: 'videos', icon: 'ri-video-line', label: 'Videos', formats: 'MP4, MOV, MKV, AVI, WEBM, FLV, WMV, M4V' },
-  { id: 'pdfs', icon: 'ri-file-pdf-line', label: 'PDFs', formats: 'PDF' },
-  { id: 'audio', icon: 'ri-music-line', label: 'Audio', formats: 'MP3, FLAC, WAV, AAC, OGG, M4A, WMA, AIFF' },
-  { id: 'docs', icon: 'ri-file-text-line', label: 'Docs', formats: 'DOCX, TXT, RTF, ODT, DOC, XLSX, PPTX, CSV' },
-  { id: 'archives', icon: 'ri-archive-line', label: 'Archives', formats: 'ZIP, RAR, 7Z, TAR, GZ, BZ2, XZ' },
-];
-
-const sizePresets = ['Any', '< 1 MB', '1 - 10 MB', '10 - 100 MB', '> 100 MB'];
-const datePresets = ['Any time', 'Today', 'This week', 'This month', 'This year'];
+import { useSettings } from '../../../settings/SettingsContext';
+import {
+  FILTER_TYPE_PRESETS,
+  SIZE_PRESETS,
+  DATE_PRESETS,
+  buildExtensionAllowlist,
+  deriveActiveTypeIds,
+  sizePresetLabel,
+  datePresetLabel,
+  datePresetToAfterMs,
+  type FilterTypePreset,
+} from '../../../settings/filterPresets';
 
 export default function FiltersView() {
-  const [filterTypes, setFilterTypes] = useState<FilterType[]>(defaultFilterTypes);
-  const [activeTypes, setActiveTypes] = useState<string[]>(['images', 'videos', 'pdfs']);
-  const [customExt, setCustomExt] = useState('');
-  const [sizePreset, setSizePreset] = useState('Any');
-  const [datePreset, setDatePreset] = useState('Any time');
-  const [ignoreHidden, setIgnoreHidden] = useState(true);
-  const [includeSubdirs, setIncludeSubdirs] = useState(true);
+  const { settings, updateFilters, updateSettings } = useSettings();
+  const filters = settings.filters;
+
+  const [filterTypes, setFilterTypes] = useState<FilterTypePreset[]>(FILTER_TYPE_PRESETS);
+  const activeTypes = useMemo(
+    () => deriveActiveTypeIds(filters.extensions, filterTypes),
+    [filters.extensions, filterTypes]
+  );
+
+  // Custom extensions: anything in the allowlist that isn't covered by an active preset.
+  const customExtFromFilters = useMemo(() => {
+    if (!filters.extensions) return '';
+    const presetExts = new Set<string>();
+    activeTypes.forEach((id) => {
+      filterTypes
+        .find((p) => p.id === id)
+        ?.formats.forEach((f) => presetExts.add(f.toLowerCase()));
+    });
+    const extras = filters.extensions.filter((e) => !presetExts.has(e.toLowerCase()));
+    return extras.map((e) => `.${e}`).join(', ');
+  }, [filters.extensions, activeTypes, filterTypes]);
+
+  const [customExt, setCustomExt] = useState(customExtFromFilters);
+  useEffect(() => setCustomExt(customExtFromFilters), [customExtFromFilters]);
+
+  const sizePreset = sizePresetLabel(filters.minSize, filters.maxSize);
+  const datePreset = datePresetLabel(filters.modifiedAfterMs);
+
+  const ignoredFolders = filters.ignoredFolders;
+  const ignoredTypes = filters.ignoredExtensions.map((e) => e.toUpperCase());
 
   // Extension editing modal
-  const [editingType, setEditingType] = useState<FilterType | null>(null);
+  const [editingType, setEditingType] = useState<FilterTypePreset | null>(null);
   const [editFormats, setEditFormats] = useState<string[]>([]);
   const [newEditExt, setNewEditExt] = useState('');
   const modalRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
-  // Ignore lists
-  const [ignoredFolders, setIgnoredFolders] = useState<string[]>(['/Users/Trash', '/Users/Library/Caches']);
   const [newFolder, setNewFolder] = useState('');
-  const [ignoredTypes, setIgnoredTypes] = useState<string[]>(['TMP', 'DS_Store']);
   const [newType, setNewType] = useState('');
 
-  const toggleType = (id: string) => {
-    setActiveTypes((prev) =>
-      prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]
-    );
+  const writeAllowlist = (typeIds: string[], custom: string) => {
+    const list = buildExtensionAllowlist(typeIds, custom, filterTypes);
+    updateFilters({ extensions: list });
   };
 
-  const openEditModal = (e: React.MouseEvent, ft: FilterType) => {
+  const toggleType = (id: string) => {
+    const next = activeTypes.includes(id)
+      ? activeTypes.filter((t) => t !== id)
+      : [...activeTypes, id];
+    writeAllowlist(next, customExt);
+  };
+
+  const onCustomExtChange = (v: string) => {
+    setCustomExt(v);
+    writeAllowlist(activeTypes, v);
+  };
+
+  const setSizePreset = (label: string) => {
+    const p = SIZE_PRESETS.find((s) => s.label === label) ?? SIZE_PRESETS[0];
+    updateFilters({ minSize: p.min ?? null, maxSize: p.max ?? null });
+  };
+
+  const setDatePreset = (label: string) => {
+    const after = datePresetToAfterMs(label);
+    updateFilters({ modifiedAfterMs: after ?? null });
+  };
+
+  const openEditModal = (e: React.MouseEvent, ft: FilterTypePreset) => {
     e.stopPropagation();
     setEditingType(ft);
-    setEditFormats(
-      ft.formats
-        .split(',')
-        .map((f) => f.trim().toUpperCase())
-        .filter(Boolean)
-    );
+    setEditFormats([...ft.formats]);
     setNewEditExt('');
-    // Focus input after modal opens
     setTimeout(() => editInputRef.current?.focus(), 50);
   };
 
@@ -69,13 +97,13 @@ export default function FiltersView() {
 
   const saveEditModal = () => {
     if (!editingType) return;
-    setFilterTypes((prev) =>
-      prev.map((ft) =>
-        ft.id === editingType.id
-          ? { ...ft, formats: editFormats.join(', ') }
-          : ft
-      )
+    const updated = filterTypes.map((ft) =>
+      ft.id === editingType.id ? { ...ft, formats: editFormats } : ft
     );
+    setFilterTypes(updated);
+    // Re-emit allowlist with the updated preset definitions.
+    const list = buildExtensionAllowlist(activeTypes, customExt, updated);
+    updateFilters({ extensions: list });
     closeEditModal();
   };
 
@@ -95,7 +123,6 @@ export default function FiltersView() {
     setEditFormats((prev) => prev.filter((e) => e !== ext));
   };
 
-  // Close modal on click outside
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (modalRef.current && !modalRef.current.contains(e.target as Node)) {
@@ -114,42 +141,36 @@ export default function FiltersView() {
   }, [editingType]);
 
   const selectedExtensions = useMemo(() => {
-    const exts: string[] = [];
-    activeTypes.forEach((id) => {
-      const ft = filterTypes.find((t) => t.id === id);
-      if (ft) {
-        ft.formats.split(',').forEach((f) => exts.push(f.trim()));
-      }
-    });
-    if (customExt.trim()) {
-      customExt
-        .split(',')
-        .map((s) => s.trim().replace(/^\./, '').toUpperCase())
-        .filter(Boolean)
-        .forEach((e) => exts.push(e));
+    if (!filters.extensions) {
+      // null = all extensions; show preset buckets as a hint
+      const all: string[] = [];
+      filterTypes.forEach((ft) => ft.formats.forEach((f) => all.push(f)));
+      return [...new Set(all)];
     }
-    return [...new Set(exts)];
-  }, [activeTypes, customExt, filterTypes]);
+    return [...new Set(filters.extensions.map((e) => e.toUpperCase()))];
+  }, [filters.extensions, filterTypes]);
 
   const addIgnoredFolder = () => {
     if (!newFolder.trim()) return;
-    setIgnoredFolders((prev) => [...prev, newFolder.trim()]);
+    updateFilters({ ignoredFolders: [...ignoredFolders, newFolder.trim()] });
     setNewFolder('');
   };
 
   const removeIgnoredFolder = (idx: number) => {
-    setIgnoredFolders((prev) => prev.filter((_, i) => i !== idx));
+    updateFilters({ ignoredFolders: ignoredFolders.filter((_, i) => i !== idx) });
   };
 
   const addIgnoredType = () => {
     if (!newType.trim()) return;
-    const clean = newType.trim().replace(/^\./, '').toUpperCase();
-    setIgnoredTypes((prev) => [...prev, clean]);
+    const clean = newType.trim().replace(/^\./, '').toLowerCase();
+    updateFilters({ ignoredExtensions: [...filters.ignoredExtensions, clean] });
     setNewType('');
   };
 
   const removeIgnoredType = (idx: number) => {
-    setIgnoredTypes((prev) => prev.filter((_, i) => i !== idx));
+    updateFilters({
+      ignoredExtensions: filters.ignoredExtensions.filter((_, i) => i !== idx),
+    });
   };
 
   return (
@@ -202,7 +223,9 @@ export default function FiltersView() {
 
         {/* Selected Extensions */}
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
-          <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Selected Extensions</p>
+          <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">
+            {filters.extensions ? 'Selected Extensions' : 'All Extensions Included'}
+          </p>
           {selectedExtensions.length === 0 ? (
             <p className="text-white/25 text-xs">No file types selected. Add at least one category or a custom extension.</p>
           ) : (
@@ -249,7 +272,7 @@ export default function FiltersView() {
               <div className="flex flex-wrap gap-2">
                 {ignoredFolders.map((folder, idx) => (
                   <span
-                    key={idx}
+                    key={`${folder}-${idx}`}
                     className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-full border border-white/10 bg-white/5 text-white/60"
                   >
                     <i className="ri-folder-line text-white/30"></i>
@@ -294,7 +317,7 @@ export default function FiltersView() {
               <div className="flex flex-wrap gap-2">
                 {ignoredTypes.map((ext, idx) => (
                   <span
-                    key={idx}
+                    key={`${ext}-${idx}`}
                     className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-full border border-white/10 bg-white/5 text-white/60"
                   >
                     <i className="ri-file-forbid-line text-white/30"></i>
@@ -320,12 +343,12 @@ export default function FiltersView() {
               type="text"
               placeholder=".custom, .ext, .log ..."
               value={customExt}
-              onChange={(e) => setCustomExt(e.target.value)}
+              onChange={(e) => onCustomExtChange(e.target.value)}
               className="w-full text-sm px-4 py-3 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
             />
             {customExt && (
               <button
-                onClick={() => setCustomExt('')}
+                onClick={() => onCustomExtChange('')}
                 className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white/60 transition-colors duration-200 cursor-pointer"
               >
                 <i className="ri-close-line text-xs"></i>
@@ -340,17 +363,17 @@ export default function FiltersView() {
           <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
             <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">File Size</p>
             <div className="flex flex-wrap gap-2">
-              {sizePresets.map((preset) => (
+              {SIZE_PRESETS.map((p) => (
                 <button
-                  key={preset}
-                  onClick={() => setSizePreset(preset)}
+                  key={p.label}
+                  onClick={() => setSizePreset(p.label)}
                   className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap ${
-                    sizePreset === preset
+                    sizePreset === p.label
                       ? 'border-[#f5c542] bg-[#f5c542]/10 text-[#f5c542]'
                       : 'border-white/10 text-white/50 hover:border-white/20'
                   }`}
                 >
-                  {preset}
+                  {p.label}
                 </button>
               ))}
             </div>
@@ -358,17 +381,17 @@ export default function FiltersView() {
           <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
             <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Date Modified</p>
             <div className="flex flex-wrap gap-2">
-              {datePresets.map((preset) => (
+              {DATE_PRESETS.map((p) => (
                 <button
-                  key={preset}
-                  onClick={() => setDatePreset(preset)}
+                  key={p.label}
+                  onClick={() => setDatePreset(p.label)}
                   className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap ${
-                    datePreset === preset
+                    datePreset === p.label
                       ? 'border-[#f5c542] bg-[#f5c542]/10 text-[#f5c542]'
                       : 'border-white/10 text-white/50 hover:border-white/20'
                   }`}
                 >
-                  {preset}
+                  {p.label}
                 </button>
               ))}
             </div>
@@ -383,14 +406,14 @@ export default function FiltersView() {
               <p className="text-white/30 text-xs mt-0.5">Skip files starting with a dot</p>
             </div>
             <button
-              onClick={() => setIgnoreHidden(!ignoreHidden)}
+              onClick={() => updateSettings({ ignoreHidden: !settings.ignoreHidden })}
               className={`relative w-12 h-7 rounded-full transition-colors duration-300 cursor-pointer ${
-                ignoreHidden ? 'bg-[#f5c542]' : 'bg-white/10'
+                settings.ignoreHidden ? 'bg-[#f5c542]' : 'bg-white/10'
               }`}
             >
               <div
                 className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
-                  ignoreHidden ? 'translate-x-6' : 'translate-x-1'
+                  settings.ignoreHidden ? 'translate-x-6' : 'translate-x-1'
                 }`}
               />
             </button>
@@ -402,14 +425,14 @@ export default function FiltersView() {
               <p className="text-white/30 text-xs mt-0.5">Scan nested folders recursively</p>
             </div>
             <button
-              onClick={() => setIncludeSubdirs(!includeSubdirs)}
+              onClick={() => updateFilters({ includeSubdirs: !filters.includeSubdirs })}
               className={`relative w-12 h-7 rounded-full transition-colors duration-300 cursor-pointer ${
-                includeSubdirs ? 'bg-[#f5c542]' : 'bg-white/10'
+                filters.includeSubdirs ? 'bg-[#f5c542]' : 'bg-white/10'
               }`}
             >
               <div
                 className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
-                  includeSubdirs ? 'translate-x-6' : 'translate-x-1'
+                  filters.includeSubdirs ? 'translate-x-6' : 'translate-x-1'
                 }`}
               />
             </button>
@@ -424,7 +447,6 @@ export default function FiltersView() {
             ref={modalRef}
             className="bg-[#3d2418] rounded-2xl border border-white/10 w-full max-w-md shadow-2xl"
           >
-            {/* Modal Header */}
             <div className="flex items-center justify-between p-5 border-b border-white/10">
               <div>
                 <h3 className="text-white text-lg font-semibold">
@@ -442,9 +464,7 @@ export default function FiltersView() {
               </button>
             </div>
 
-            {/* Modal Body */}
             <div className="p-5 space-y-4">
-              {/* Add new extension */}
               <div className="flex gap-2">
                 <input
                   ref={editInputRef}
@@ -469,7 +489,6 @@ export default function FiltersView() {
                 </button>
               </div>
 
-              {/* Extensions list */}
               <div>
                 <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">
                   {editFormats.length} Extension{editFormats.length !== 1 ? 's' : ''}
@@ -497,7 +516,6 @@ export default function FiltersView() {
               </div>
             </div>
 
-            {/* Modal Footer */}
             <div className="flex items-center justify-end gap-2 p-5 border-t border-white/10">
               <button
                 onClick={closeEditModal}
