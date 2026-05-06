@@ -33,6 +33,8 @@ export interface UiFile {
   formattedDate: string;
   icon: string;
   assetUrl: string;
+  bucket: BucketType;
+  ext: string;
 }
 
 export interface UiGroup {
@@ -48,7 +50,7 @@ export interface UiGroup {
 
 function adaptFile(f: BackendDuplicateFile): UiFile {
   const ext = fileExtension(f.path);
-  const { icon } = extensionToBucket(ext);
+  const { icon, type } = extensionToBucket(ext);
   return {
     path: f.path,
     name: basename(f.path),
@@ -59,6 +61,8 @@ function adaptFile(f: BackendDuplicateFile): UiFile {
     formattedDate: formatDate(f.modifiedMs),
     icon,
     assetUrl: convertFileSrc(f.path),
+    bucket: type,
+    ext,
   };
 }
 

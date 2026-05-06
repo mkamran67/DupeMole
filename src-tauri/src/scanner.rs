@@ -80,6 +80,18 @@ fn modified_ms(path: &Path) -> Option<u64> {
     Some(duration.as_millis() as u64)
 }
 
+/// Resolve the timestamp the UI treats as "original date". When metadata
+/// reads are enabled and the file is a supported image/video, prefer the
+/// EXIF/container capture date; otherwise fall back to filesystem mtime.
+fn resolved_date_ms(path: &Path, use_metadata: bool) -> Option<u64> {
+    if use_metadata {
+        if let Some(ms) = crate::media_date::read_metadata_ms(path) {
+            return Some(ms);
+        }
+    }
+    modified_ms(path)
+}
+
 fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
@@ -128,19 +140,26 @@ fn passes_filters(path: &Path, size: u64, filters: &Filters) -> bool {
     true
 }
 
-fn walk_files(
+fn walk_files<F>(
     roots: &[PathBuf],
     ignore_hidden: bool,
     filters: &Filters,
     cancel: &CancelToken,
     extension_counts: &mut HashMap<String, u64>,
-) -> Vec<(PathBuf, u64)> {
+    on_progress: &F,
+) -> Vec<(PathBuf, u64)>
+where
+    F: Fn(ScanProgress) + Sync + Send,
+{
     let mut out = Vec::new();
     let ignored_folders: Vec<String> = filters
         .ignored_folders
         .iter()
         .map(|s| s.to_lowercase())
         .collect();
+    let mut last_emit = std::time::Instant::now();
+    const EMIT_EVERY_FILES: u64 = 256;
+    const EMIT_EVERY_MS: u128 = 120;
     for root in roots {
         let mut walker = WalkDir::new(root).follow_links(false);
         if !filters.include_subdirs {
@@ -179,7 +198,20 @@ fn walk_files(
             if let Some(ext) = extension_lower(&path) {
                 *extension_counts.entry(ext).or_insert(0) += 1;
             }
-            out.push((path, size));
+            out.push((path.clone(), size));
+            let count = out.len() as u64;
+            let now = std::time::Instant::now();
+            if count % EMIT_EVERY_FILES == 0
+                || now.duration_since(last_emit).as_millis() >= EMIT_EVERY_MS
+            {
+                last_emit = now;
+                on_progress(ScanProgress {
+                    processed: count,
+                    total: 0,
+                    current_path: Some(path),
+                    phase: "walking",
+                });
+            }
         }
     }
     out
@@ -254,8 +286,16 @@ where
         &settings.filters,
         cancel,
         &mut extension_counts,
+        &on_progress,
     );
     let total_files = all_files.len() as u64;
+
+    on_progress(ScanProgress {
+        processed: total_files,
+        total: total_files,
+        current_path: None,
+        phase: "walking",
+    });
 
     if cancel.is_cancelled() {
         return ScanComplete {
@@ -315,7 +355,7 @@ where
                         .push(DuplicateFile {
                             path: path.clone(),
                             size: *size,
-                            modified_ms: modified_ms(path),
+                            modified_ms: resolved_date_ms(path, settings.use_metadata_dates),
                         });
                 }
                 by_hash

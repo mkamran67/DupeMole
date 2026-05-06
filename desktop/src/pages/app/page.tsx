@@ -7,6 +7,7 @@ import FiltersView from './components/FiltersView';
 import SettingsView from './components/SettingsView';
 import CompareView from './components/CompareView';
 import AboutView from './components/AboutView';
+import StatsFooter from './components/StatsFooter';
 
 export default function AppPage() {
   const [activeTab, setActiveTab] = useState('scan');
@@ -33,6 +34,7 @@ export default function AppPage() {
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
       <main className="flex-1 overflow-y-auto p-5 md:p-8 pb-10 md:pb-16">
         {groupId ? <CompareView /> : views[activeTab]}
+        {!groupId && activeTab === 'scan' && <StatsFooter />}
       </main>
     </div>
   );

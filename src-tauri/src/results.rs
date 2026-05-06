@@ -2,9 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 use crate::scanner::ScanComplete;
+use crate::stats::{self, StatsState};
 
 fn last_scan_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
@@ -48,25 +49,49 @@ pub struct DeleteFailure {
 pub struct DeleteResult {
     pub deleted: Vec<String>,
     pub failed: Vec<DeleteFailure>,
+    pub freed_bytes: u64,
 }
 
 #[tauri::command]
-pub fn delete_files(paths: Vec<String>, permanent: bool) -> DeleteResult {
+pub fn delete_files(
+    paths: Vec<String>,
+    permanent: bool,
+    app: AppHandle,
+    stats_state: State<StatsState>,
+) -> DeleteResult {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
+    let mut freed_bytes: u64 = 0;
     for path in paths {
         let p = Path::new(&path);
+        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
         let result: Result<(), String> = if permanent {
             fs::remove_file(p).map_err(|e| e.to_string())
         } else {
             trash::delete(p).map_err(|e| e.to_string())
         };
         match result {
-            Ok(()) => deleted.push(path),
+            Ok(()) => {
+                freed_bytes = freed_bytes.saturating_add(size);
+                deleted.push(path);
+            }
             Err(error) => failed.push(DeleteFailure { path, error }),
         }
     }
-    DeleteResult { deleted, failed }
+
+    if !deleted.is_empty() {
+        let snapshot = {
+            let mut s = stats_state.0.lock().unwrap();
+            s.total_bytes_freed = s.total_bytes_freed.saturating_add(freed_bytes);
+            s.total_files_deleted = s.total_files_deleted.saturating_add(deleted.len() as u64);
+            *s
+        };
+        if let Err(e) = stats::save(&app, &snapshot) {
+            eprintln!("stats::save failed: {e}");
+        }
+    }
+
+    DeleteResult { deleted, failed, freed_bytes }
 }
 
 fn recompute_summary(scan: &mut ScanComplete) {

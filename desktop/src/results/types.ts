@@ -28,4 +28,5 @@ export interface DeleteFailure {
 export interface DeleteResult {
   deleted: string[];
   failed: DeleteFailure[];
+  freedBytes: number;
 }

@@ -408,7 +408,7 @@ function ScanCompleteModal({
 }
 
 export default function ScanView({ onNavigateToResults }: ScanViewProps) {
-  const { settings, updateFilters } = useSettings();
+  const { settings, updateSettings, updateFilters } = useSettings();
   const { setLatestScan } = useResults();
   const activeTypeIds = useMemo(
     () => deriveActiveTypeIds(settings.filters.extensions),
@@ -417,6 +417,10 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
 
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [phase, setPhase] = useState<'walking' | 'hashing' | null>(null);
+  const [phaseProcessed, setPhaseProcessed] = useState(0);
+  const [phaseTotal, setPhaseTotal] = useState(0);
+  const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [directories, setDirectories] = useState<Directory[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [scanComplete, setScanComplete] = useState(false);
@@ -503,6 +507,10 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
     if (directories.length === 0) return;
     setScanning(true);
     setProgress(0);
+    setPhase('walking');
+    setPhaseProcessed(0);
+    setPhaseTotal(0);
+    setCurrentPath(null);
     setScanComplete(false);
     setExtensionCounts(null);
     setDirectories((prev) => prev.map((d) => ({ ...d, progress: 0, scanned: false, files: 0 })));
@@ -531,9 +539,19 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
 
     listen<ScanProgressEvent>('scan://progress', (e) => {
       if (e.payload.scanId !== activeScanId.current) return;
-      const { processed, total, phase } = e.payload.progress;
+      const { processed, total, phase: ph, currentPath: cp } = e.payload.progress;
+      setPhase(ph);
+      setPhaseProcessed(processed);
+      setPhaseTotal(total);
+      setCurrentPath(cp);
+      // Walking owns 0–30% via a soft asymptote on file count (no known total).
+      // Hashing owns 30–100% with a real ratio.
       const pct =
-        phase === 'walking' ? 5 : total === 0 ? 100 : 5 + (processed / total) * 95;
+        ph === 'walking'
+          ? 30 * (1 - Math.exp(-processed / 5000))
+          : total === 0
+            ? 100
+            : 30 + (processed / total) * 70;
       const clamped = Math.min(99, pct);
       setProgress(clamped);
       setDirectories((prev) => prev.map((d) => ({ ...d, progress: clamped })));
@@ -571,6 +589,8 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       );
       console.info('[scan] complete', result);
       setProgress(100);
+      setPhase(null);
+      setCurrentPath(null);
       setScanning(false);
       setScanComplete(true);
       activeScanId.current = null;
@@ -740,6 +760,32 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
         </div>
       </div>
 
+      {/* Scan options */}
+      <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6 flex items-start gap-4">
+        <div className="w-9 h-9 rounded-lg bg-[#f5c542]/10 flex items-center justify-center shrink-0">
+          <i className="ri-camera-lens-line text-[#f5c542] text-sm"></i>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-white text-sm font-semibold">Read Photo &amp; Video Dates</p>
+          <p className="text-white/40 text-xs mt-0.5 leading-relaxed">
+            Use EXIF / video metadata for the original capture date instead of file modified time. Slower but more accurate.
+          </p>
+        </div>
+        <button
+          onClick={() => updateSettings({ useMetadataDates: !settings.useMetadataDates })}
+          disabled={scanning}
+          className={`relative w-11 h-6 rounded-full transition-colors duration-300 cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
+            settings.useMetadataDates ? 'bg-[#f5c542]' : 'bg-white/10'
+          }`}
+        >
+          <div
+            className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-300 ${
+              settings.useMetadataDates ? 'translate-x-6' : 'translate-x-1'
+            }`}
+          />
+        </button>
+      </div>
+
       {/* Directories List */}
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-4">Selected Directories</p>
@@ -786,7 +832,13 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       {scanning && (
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
-            <span className="text-white text-sm font-medium">Overall Progress</span>
+            <span className="text-white text-sm font-medium">
+              {phase === 'walking'
+                ? 'Discovering files'
+                : phase === 'hashing'
+                  ? 'Hashing & comparing'
+                  : 'Overall Progress'}
+            </span>
             <span className="text-[#f5c542] text-sm font-semibold">{Math.round(progress)}%</span>
           </div>
           <div className="h-3 bg-white/10 rounded-full overflow-hidden">
@@ -795,7 +847,21 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-white/30 text-xs mt-3 font-mono">Scanning recursively with SHA-256 hash comparison...</p>
+          <div className="flex items-center justify-between mt-3 gap-4">
+            <p className="text-white/40 text-xs font-mono truncate">
+              {currentPath ?? (phase === 'walking' ? 'Walking directories…' : 'Preparing…')}
+            </p>
+            <p className="text-white/40 text-xs font-mono shrink-0">
+              {phase === 'walking'
+                ? `${phaseProcessed.toLocaleString()} found`
+                : phase === 'hashing'
+                  ? `${phaseProcessed.toLocaleString()} / ${phaseTotal.toLocaleString()}`
+                  : ''}
+            </p>
+          </div>
+          <p className="text-white/30 text-[11px] mt-2 font-mono">
+            BLAKE3 content hashing · partial hash for files &gt; 64 MB
+          </p>
         </div>
       )}
 

@@ -58,6 +58,10 @@ pub struct Settings {
     pub minimize_tray: bool,
     pub language: String,
     pub filters: Filters,
+    /// When true, scanner reads EXIF/container metadata for images and videos
+    /// to determine the "original" capture date instead of filesystem mtime.
+    /// Slower but more accurate when files have been copied/moved.
+    pub use_metadata_dates: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +76,7 @@ impl Default for Settings {
             minimize_tray: true,
             language: "English".to_string(),
             filters: Filters::default(),
+            use_metadata_dates: false,
         }
     }
 }

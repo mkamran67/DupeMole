@@ -1,6 +1,9 @@
+mod media_date;
 mod results;
 mod scanner;
 mod settings;
+mod stats;
+mod thumbnails;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +15,7 @@ use uuid::Uuid;
 
 use scanner::{CancelToken, ScanComplete, ScanProgress};
 use settings::{Settings, SettingsState};
+use stats::{LifetimeStats, StatsState};
 
 #[tauri::command]
 fn get_settings(state: State<SettingsState>) -> Settings {
@@ -27,6 +31,11 @@ fn update_settings(
     settings::save(&app, &new)?;
     *state.0.lock().unwrap() = new;
     Ok(())
+}
+
+#[tauri::command]
+fn get_stats(state: State<StatsState>) -> LifetimeStats {
+    *state.0.lock().unwrap()
 }
 
 #[derive(Default)]
@@ -70,8 +79,23 @@ fn start_scan(
 
         let result: ScanComplete = scanner::run_scan(path_bufs, &settings, &cancel, on_progress);
 
+        let was_cancelled = cancel.0.load(std::sync::atomic::Ordering::SeqCst);
+
         if let Err(e) = results::save_last_scan(&app_handle, &result) {
             eprintln!("save_last_scan failed: {e}");
+        }
+
+        if !was_cancelled {
+            if let Some(stats_state) = app_handle.try_state::<StatsState>() {
+                let snapshot = {
+                    let mut s = stats_state.0.lock().unwrap();
+                    s.total_scans_run = s.total_scans_run.saturating_add(1);
+                    *s
+                };
+                if let Err(e) = stats::save(&app_handle, &snapshot) {
+                    eprintln!("stats::save failed: {e}");
+                }
+            }
         }
 
         let _ = app_handle.emit(
@@ -102,17 +126,21 @@ pub fn run() {
         .setup(|app| {
             let loaded = settings::load(app.handle());
             app.manage(SettingsState(Mutex::new(loaded)));
+            let loaded_stats = stats::load(app.handle());
+            app.manage(StatsState(Mutex::new(loaded_stats)));
             app.manage(ActiveScans::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
+            get_stats,
             start_scan,
             cancel_scan,
             results::get_last_scan,
             results::delete_files,
-            results::prune_last_scan
+            results::prune_last_scan,
+            thumbnails::get_thumbnail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

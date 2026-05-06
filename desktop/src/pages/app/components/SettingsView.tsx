@@ -61,6 +61,15 @@ const settings: SettingItem[] = [
     default: false,
   },
   {
+    id: 'use-metadata-dates',
+    icon: 'ri-camera-lens-line',
+    title: 'Read Photo & Video Dates',
+    description:
+      'Use EXIF / video metadata for the original capture date instead of file modified time. Slower but more accurate.',
+    type: 'toggle',
+    default: false,
+  },
+  {
     id: 'minimize-tray',
     icon: 'ri-indeterminate-circle-line',
     title: 'Minimize to Tray',
@@ -88,6 +97,7 @@ const idToKey: Record<string, keyof AppSettings> = {
   'auto-scan': 'autoScan',
   'minimize-tray': 'minimizeTray',
   'language': 'language',
+  'use-metadata-dates': 'useMetadataDates',
 };
 
 function scanThreadsToString(v: ScanThreads): string {

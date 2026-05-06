@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useResults } from './ResultsContext';
+import { useStats } from '../stats/StatsContext';
 import type { DeleteFailure, DeleteResult } from './types';
 
 export interface DeleteOutcome {
@@ -10,6 +11,7 @@ export interface DeleteOutcome {
 
 export function useDelete() {
   const { pruneScan } = useResults();
+  const { refresh: refreshStats } = useStats();
   const [deleting, setDeleting] = useState(false);
   const [lastFailures, setLastFailures] = useState<DeleteFailure[]>([]);
 
@@ -23,6 +25,7 @@ export function useDelete() {
         const result = await invoke<DeleteResult>('delete_files', { paths, permanent });
         if (result.deleted.length > 0) {
           await pruneScan(result.deleted);
+          refreshStats();
         }
         setLastFailures(result.failed);
         return result;
@@ -35,7 +38,7 @@ export function useDelete() {
         setDeleting(false);
       }
     },
-    [pruneScan]
+    [pruneScan, refreshStats]
   );
 
   const clearFailures = useCallback(() => setLastFailures([]), []);

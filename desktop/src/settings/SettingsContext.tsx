@@ -43,6 +43,7 @@ export interface AppSettings {
   minimizeTray: boolean;
   language: string;
   filters: AppFilters;
+  useMetadataDates: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -55,6 +56,7 @@ const DEFAULTS: AppSettings = {
   minimizeTray: true,
   language: 'English',
   filters: DEFAULT_FILTERS,
+  useMetadataDates: false,
 };
 
 interface SettingsContextValue {
