@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ScanView from './components/ScanView';
 import ResultsView from './components/ResultsView';
+import OrganizeView from './components/OrganizeView';
 import FiltersView from './components/FiltersView';
 import SettingsView from './components/SettingsView';
 import CompareView from './components/CompareView';
@@ -24,6 +25,7 @@ export default function AppPage() {
   const views: Record<string, React.ReactNode> = {
     scan: <ScanView onNavigateToResults={handleNavigateToResults} />,
     results: <ResultsView onNavigateToScan={handleNavigateToScan} />,
+    organize: <OrganizeView />,
     filters: <FiltersView />,
     settings: <SettingsView />,
     about: <AboutView />,

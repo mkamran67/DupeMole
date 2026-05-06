@@ -1,4 +1,5 @@
 mod media_date;
+mod organize;
 mod results;
 mod scanner;
 mod settings;
@@ -129,6 +130,7 @@ pub fn run() {
             let loaded_stats = stats::load(app.handle());
             app.manage(StatsState(Mutex::new(loaded_stats)));
             app.manage(ActiveScans::default());
+            app.manage(organize::ActiveOrganizes::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -137,6 +139,8 @@ pub fn run() {
             get_stats,
             start_scan,
             cancel_scan,
+            organize::start_organize,
+            organize::cancel_organize,
             results::get_last_scan,
             results::delete_files,
             results::prune_last_scan,
