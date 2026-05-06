@@ -6,6 +6,7 @@ import ResultsView from './components/ResultsView';
 import FiltersView from './components/FiltersView';
 import SettingsView from './components/SettingsView';
 import CompareView from './components/CompareView';
+import AboutView from './components/AboutView';
 
 export default function AppPage() {
   const [activeTab, setActiveTab] = useState('scan');
@@ -20,6 +21,7 @@ export default function AppPage() {
     results: <ResultsView />,
     filters: <FiltersView />,
     settings: <SettingsView />,
+    about: <AboutView />,
   };
 
   return (
