@@ -449,4 +449,148 @@ mod tests {
         let g = Granularity { year: false, month: false, day: false };
         assert_eq!(build_subdir(&target, ms, &g), target);
     }
+
+    use std::io::Write;
+
+    fn tempdir() -> PathBuf {
+        let base = std::env::temp_dir().join(format!("dupemole-org-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn unix_ms_to_civil_year_boundaries() {
+        // 1999-12-31 23:59:59 UTC = 946_684_799 sec
+        let (y, m, d) = unix_ms_to_civil(946_684_799_000);
+        assert_eq!((y, m, d), (1999, 12, 31));
+        // 2000-01-01 00:00:00 UTC
+        let (y, m, d) = unix_ms_to_civil(946_684_800_000);
+        assert_eq!((y, m, d), (2000, 1, 1));
+    }
+
+    #[test]
+    fn unix_ms_to_civil_2024_leap_day() {
+        // 2024-02-29 00:00:00 UTC = 1_709_164_800 sec
+        let (y, m, d) = unix_ms_to_civil(1_709_164_800_000);
+        assert_eq!((y, m, d), (2024, 2, 29));
+    }
+
+    #[test]
+    fn build_subdir_uses_month_name_format() {
+        let target = PathBuf::from("/tmp/x");
+        // 2024-01-15
+        let ms = 1_705_276_800_000;
+        let g = Granularity { year: true, month: true, day: false };
+        assert_eq!(build_subdir(&target, ms, &g), PathBuf::from("/tmp/x/2024/01-January"));
+    }
+
+    #[test]
+    fn build_subdir_zero_ms_is_epoch() {
+        let target = PathBuf::from("/t");
+        let g = Granularity { year: true, month: true, day: true };
+        assert_eq!(build_subdir(&target, 0, &g), PathBuf::from("/t/1970/01-January/01"));
+    }
+
+    #[test]
+    fn extension_allowed_with_no_filter_passes_all() {
+        assert!(extension_allowed(Path::new("/x/file.foo"), &None));
+        assert!(extension_allowed(Path::new("/x/no_ext"), &None));
+    }
+
+    #[test]
+    fn extension_allowed_filter_is_case_insensitive() {
+        let allow = Some(vec!["jpg".into(), "png".into()]);
+        assert!(extension_allowed(Path::new("/x/photo.JPG"), &allow));
+        assert!(extension_allowed(Path::new("/x/photo.png"), &allow));
+        assert!(!extension_allowed(Path::new("/x/doc.pdf"), &allow));
+    }
+
+    #[test]
+    fn extension_allowed_rejects_extensionless_when_filter_present() {
+        let allow = Some(vec!["jpg".into()]);
+        assert!(!extension_allowed(Path::new("/x/no_ext"), &allow));
+    }
+
+    #[test]
+    fn files_byte_identical_detects_match() {
+        let dir = tempdir();
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        write_file(&a, b"identical-content");
+        write_file(&b, b"identical-content");
+        assert!(files_byte_identical(&a, &b).unwrap());
+    }
+
+    #[test]
+    fn files_byte_identical_detects_different_size() {
+        let dir = tempdir();
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        write_file(&a, b"short");
+        write_file(&b, b"longer-content");
+        assert!(!files_byte_identical(&a, &b).unwrap());
+    }
+
+    #[test]
+    fn files_byte_identical_detects_same_size_different_bytes() {
+        let dir = tempdir();
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        write_file(&a, b"AAAAAAAAAA");
+        write_file(&b, b"BBBBBBBBBB");
+        assert!(!files_byte_identical(&a, &b).unwrap());
+    }
+
+    #[test]
+    fn resolve_destination_returns_desired_when_free() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        write_file(&src, b"data");
+        let desired = dir.join("dest").join("src.txt");
+        let result = resolve_destination(&src, desired.clone()).unwrap();
+        assert_eq!(result, Some(desired));
+    }
+
+    #[test]
+    fn resolve_destination_skips_when_identical_already_at_desired() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"same");
+        write_file(&dest, b"same");
+        let result = resolve_destination(&src, dest).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_destination_appends_suffix_on_collision() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"new-content");
+        write_file(&dest, b"existing-different-content");
+        let result = resolve_destination(&src, dest.clone()).unwrap();
+        let resolved = result.unwrap();
+        assert_ne!(resolved, dest);
+        assert!(resolved.file_name().unwrap().to_str().unwrap().contains("(1)"));
+    }
+
+    #[test]
+    fn move_file_within_same_dir_succeeds() {
+        let dir = tempdir();
+        let src = dir.join("a.txt");
+        let dest = dir.join("b.txt");
+        write_file(&src, b"hello");
+        move_file(&src, &dest).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
 }

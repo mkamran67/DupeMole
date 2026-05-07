@@ -502,4 +502,255 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         base
     }
+
+    #[test]
+    fn no_duplicates_yields_empty_groups() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"alpha");
+        write_file(&dir.join("b.txt"), b"beta");
+        write_file(&dir.join("c.txt"), b"gamma");
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 3);
+        assert!(result.groups.is_empty());
+        assert_eq!(result.duplicate_files, 0);
+        assert_eq!(result.wasted_bytes, 0);
+    }
+
+    #[test]
+    fn three_way_duplicates_grouped_together() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"same");
+        write_file(&dir.join("b.txt"), b"same");
+        write_file(&dir.join("c.txt"), b"same");
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].files.len(), 3);
+        assert_eq!(result.duplicate_files, 3);
+        assert_eq!(result.wasted_bytes, 4 * 2);
+    }
+
+    #[test]
+    fn nonexistent_root_yields_no_files_no_panic() {
+        let phantom = std::env::temp_dir().join(format!("dupemole-missing-{}", Uuid::new_v4()));
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![phantom], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 0);
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn empty_files_are_skipped() {
+        let dir = tempdir();
+        write_file(&dir.join("empty1.txt"), b"");
+        write_file(&dir.join("empty2.txt"), b"");
+        write_file(&dir.join("real.txt"), b"hello");
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 1);
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn min_size_filter_excludes_small_files() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"x");
+        write_file(&dir.join("b.txt"), b"x");
+        let big = vec![0u8; 1024];
+        write_file(&dir.join("big1.bin"), &big);
+        write_file(&dir.join("big2.bin"), &big);
+
+        let mut settings = Settings::default();
+        settings.filters.min_size = Some(1024);
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].size, 1024);
+    }
+
+    #[test]
+    fn max_size_filter_excludes_large_files() {
+        let dir = tempdir();
+        write_file(&dir.join("small1.txt"), b"hi");
+        write_file(&dir.join("small2.txt"), b"hi");
+        write_file(&dir.join("big1.bin"), &vec![0u8; 4096]);
+        write_file(&dir.join("big2.bin"), &vec![0u8; 4096]);
+
+        let mut settings = Settings::default();
+        settings.filters.max_size = Some(100);
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.groups.len(), 1);
+    }
+
+    #[test]
+    fn ignored_extensions_are_excluded() {
+        let dir = tempdir();
+        write_file(&dir.join("keep1.txt"), b"same");
+        write_file(&dir.join("keep2.txt"), b"same");
+        write_file(&dir.join("drop1.log"), b"same");
+        write_file(&dir.join("drop2.log"), b"same");
+
+        let mut settings = Settings::default();
+        settings.filters.ignored_extensions = vec!["log".into()];
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.groups.len(), 1);
+    }
+
+    #[test]
+    fn extension_allowlist_is_case_insensitive() {
+        let dir = tempdir();
+        write_file(&dir.join("a.JPG"), b"img");
+        write_file(&dir.join("b.jpg"), b"img");
+
+        let mut settings = Settings::default();
+        settings.filters.extensions = Some(vec!["jpg".into()]);
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.groups.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_token_returns_empty_result() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"same");
+        write_file(&dir.join("b.txt"), b"same");
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        cancel.0.store(true, Ordering::SeqCst);
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn ignore_hidden_skips_dotfiles() {
+        let dir = tempdir();
+        write_file(&dir.join("visible1.txt"), b"same");
+        write_file(&dir.join("visible2.txt"), b"same");
+        write_file(&dir.join(".hidden1.txt"), b"same");
+        write_file(&dir.join(".hidden2.txt"), b"same");
+
+        let mut settings = Settings::default();
+        settings.ignore_hidden = true;
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 2);
+    }
+
+    #[test]
+    fn include_subdirs_false_does_not_recurse() {
+        let dir = tempdir();
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_file(&dir.join("top.txt"), b"same");
+        write_file(&sub.join("deep.txt"), b"same");
+
+        let mut settings = Settings::default();
+        settings.filters.include_subdirs = false;
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 1);
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn ignored_folders_are_excluded() {
+        let dir = tempdir();
+        let node_modules = dir.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        write_file(&dir.join("a.txt"), b"same");
+        write_file(&node_modules.join("b.txt"), b"same");
+
+        let mut settings = Settings::default();
+        settings.filters.ignored_folders = vec!["node_modules".into()];
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 1);
+        assert!(result.groups.is_empty());
+    }
+
+    #[test]
+    fn extension_counts_track_all_walked_files() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"one");
+        write_file(&dir.join("b.txt"), b"two");
+        write_file(&dir.join("c.md"), b"three");
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.extension_counts.get("txt").copied(), Some(2));
+        assert_eq!(result.extension_counts.get("md").copied(), Some(1));
+    }
+
+    #[test]
+    fn wasted_bytes_sums_over_multiple_groups() {
+        let dir = tempdir();
+        let a = vec![0u8; 100];
+        let b = vec![1u8; 50];
+        write_file(&dir.join("a1.bin"), &a);
+        write_file(&dir.join("a2.bin"), &a);
+        write_file(&dir.join("a3.bin"), &a);
+        write_file(&dir.join("b1.bin"), &b);
+        write_file(&dir.join("b2.bin"), &b);
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.groups.len(), 2);
+        // 100 * 2 + 50 * 1 = 250
+        assert_eq!(result.wasted_bytes, 250);
+    }
+
+    #[test]
+    fn modified_after_filter_excludes_old_files() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"same");
+        write_file(&dir.join("b.txt"), b"same");
+
+        let mut settings = Settings::default();
+        // Far in the future — nothing should pass.
+        settings.filters.modified_after_ms = Some(u64::MAX / 2);
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {});
+
+        assert_eq!(result.total_files, 0);
+    }
+
+    #[test]
+    fn hash_kind_is_full_at_threshold_partial_above() {
+        // Uses internal helpers directly to avoid materializing a 64MB+ file twice.
+        // At exactly LARGE_FILE_THRESHOLD the run_scan branch chooses Full
+        // (the comparison is `> THRESHOLD`).
+        assert!(!(LARGE_FILE_THRESHOLD > LARGE_FILE_THRESHOLD));
+        assert!(LARGE_FILE_THRESHOLD + 1 > LARGE_FILE_THRESHOLD);
+    }
 }

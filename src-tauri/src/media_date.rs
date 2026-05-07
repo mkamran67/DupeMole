@@ -158,3 +158,86 @@ pub fn read_metadata_ms(path: &Path) -> Option<u64> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_exif_datetime_known_timestamp() {
+        // 2024-03-15 12:00:00 UTC → 1_710_504_000_000 ms
+        let ms = parse_exif_datetime("2024:03:15 12:00:00").unwrap();
+        assert_eq!(ms, 1_710_504_000_000);
+    }
+
+    #[test]
+    fn parse_exif_datetime_epoch() {
+        let ms = parse_exif_datetime("1970:01:01 00:00:00").unwrap();
+        assert_eq!(ms, 0);
+    }
+
+    #[test]
+    fn parse_exif_datetime_too_short_returns_none() {
+        assert!(parse_exif_datetime("2024:03:15").is_none());
+        assert!(parse_exif_datetime("").is_none());
+    }
+
+    #[test]
+    fn parse_exif_datetime_malformed_returns_none() {
+        assert!(parse_exif_datetime("not-a-date-at-all").is_none());
+        assert!(parse_exif_datetime("XXXX:XX:XX XX:XX:XX").is_none());
+    }
+
+    #[test]
+    fn parse_exif_datetime_invalid_month_returns_none() {
+        assert!(parse_exif_datetime("2024:13:01 00:00:00").is_none());
+        assert!(parse_exif_datetime("2024:00:01 00:00:00").is_none());
+    }
+
+    #[test]
+    fn civil_to_unix_ms_round_trips_with_unix_ms_to_civil() {
+        // Use organize::unix_ms_to_civil indirectly: just verify a known value.
+        let ms = civil_to_unix_ms(2024, 3, 15, 12, 0, 0).unwrap();
+        assert_eq!(ms, 1_710_504_000_000);
+    }
+
+    #[test]
+    fn civil_to_unix_ms_rejects_pre_epoch() {
+        assert!(civil_to_unix_ms(1969, 12, 31, 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn civil_to_unix_ms_rejects_invalid_components() {
+        assert!(civil_to_unix_ms(2024, 0, 1, 0, 0, 0).is_none());
+        assert!(civil_to_unix_ms(2024, 13, 1, 0, 0, 0).is_none());
+        assert!(civil_to_unix_ms(2024, 1, 0, 0, 0, 0).is_none());
+        assert!(civil_to_unix_ms(2024, 1, 32, 0, 0, 0).is_none());
+        assert!(civil_to_unix_ms(2024, 1, 1, 24, 0, 0).is_none());
+        assert!(civil_to_unix_ms(2024, 1, 1, 0, 60, 0).is_none());
+    }
+
+    #[test]
+    fn read_metadata_ms_unknown_extension_returns_none() {
+        let path = Path::new("/nonexistent/foo.txt");
+        assert!(read_metadata_ms(path).is_none());
+    }
+
+    #[test]
+    fn read_metadata_ms_missing_image_file_returns_none() {
+        let path = Path::new("/nonexistent/foo.jpg");
+        assert!(read_metadata_ms(path).is_none());
+    }
+
+    #[test]
+    fn read_metadata_ms_extensionless_returns_none() {
+        let path = Path::new("/nonexistent/no_ext");
+        assert!(read_metadata_ms(path).is_none());
+    }
+
+    #[test]
+    fn ext_lower_normalizes_case() {
+        assert_eq!(ext_lower(Path::new("/x/IMG.JPG")), Some("jpg".to_string()));
+        assert_eq!(ext_lower(Path::new("/x/file.PNG")), Some("png".to_string()));
+        assert_eq!(ext_lower(Path::new("/x/no_ext")), None);
+    }
+}

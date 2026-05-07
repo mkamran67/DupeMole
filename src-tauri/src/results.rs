@@ -103,6 +103,100 @@ fn recompute_summary(scan: &mut ScanComplete) {
         .sum();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::{DuplicateFile, DuplicateGroup, HashKind};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn make_group(id: &str, size: u64, paths: &[&str]) -> DuplicateGroup {
+        DuplicateGroup {
+            id: id.into(),
+            hash: format!("hash-{id}"),
+            size,
+            hash_kind: HashKind::Full,
+            files: paths
+                .iter()
+                .map(|p| DuplicateFile {
+                    path: PathBuf::from(p),
+                    size,
+                    modified_ms: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn make_scan(groups: Vec<DuplicateGroup>) -> ScanComplete {
+        ScanComplete {
+            groups,
+            total_files: 0,
+            duplicate_files: 0,
+            wasted_bytes: 0,
+            extension_counts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn recompute_summary_sets_duplicate_files_and_wasted_bytes() {
+        let mut scan = make_scan(vec![
+            make_group("1", 100, &["/a", "/b", "/c"]), // 3 files, 100 bytes → wasted 200
+            make_group("2", 50, &["/d", "/e"]),        // 2 files, 50 bytes → wasted 50
+        ]);
+        recompute_summary(&mut scan);
+        assert_eq!(scan.duplicate_files, 5);
+        assert_eq!(scan.wasted_bytes, 250);
+    }
+
+    #[test]
+    fn recompute_summary_handles_empty_groups() {
+        let mut scan = make_scan(vec![]);
+        recompute_summary(&mut scan);
+        assert_eq!(scan.duplicate_files, 0);
+        assert_eq!(scan.wasted_bytes, 0);
+    }
+
+    #[test]
+    fn recompute_summary_handles_singleton_group_without_underflow() {
+        // Defense against (count - 1) underflow when a group somehow has 1 file.
+        let mut scan = make_scan(vec![make_group("solo", 100, &["/a"])]);
+        recompute_summary(&mut scan);
+        assert_eq!(scan.duplicate_files, 1);
+        assert_eq!(scan.wasted_bytes, 0);
+    }
+
+    #[test]
+    fn delete_result_serializes_with_camel_case() {
+        let r = DeleteResult {
+            deleted: vec!["/a".into()],
+            failed: vec![DeleteFailure {
+                path: "/b".into(),
+                error: "boom".into(),
+            }],
+            freed_bytes: 1024,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("freedBytes"));
+        assert!(json.contains("\"deleted\""));
+        assert!(json.contains("\"failed\""));
+    }
+
+    #[test]
+    fn scan_complete_round_trips_via_serde() {
+        let scan = make_scan(vec![make_group("1", 10, &["/a", "/b"])]);
+        let json = serde_json::to_vec(&scan).unwrap();
+        let back: ScanComplete = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.groups.len(), 1);
+        assert_eq!(back.groups[0].files.len(), 2);
+    }
+
+    #[test]
+    fn scan_complete_corrupt_json_fails_gracefully() {
+        let result: Result<ScanComplete, _> = serde_json::from_slice(b"not valid json");
+        assert!(result.is_err());
+    }
+}
+
 #[tauri::command]
 pub fn prune_last_scan(app: AppHandle, deleted: Vec<String>) -> Option<ScanComplete> {
     let mut scan = load_last_scan(&app)?;
