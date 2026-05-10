@@ -3,10 +3,31 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const IMAGE_EXTS: &[&str] = &[
-    "jpg", "jpeg", "png", "tif", "tiff", "heic", "heif", "webp", "dng", "cr2", "cr3", "nef", "arw",
-    "rw2", "orf", "raf",
+    "jpg", "jpeg", "png", "tif", "tiff", "heic", "heif", "webp", "bmp", "gif", "avif", "svg",
+    "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "arq", "srf", "sr2", "rw2", "orf", "raf",
+    "pef", "3fr", "iiq", "mef", "x3f", "erf", "raw", "dcr", "kdc", "mrw", "rwl",
 ];
 const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "3gp", "3g2"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+    Other,
+}
+
+pub fn media_kind(path: &Path) -> MediaKind {
+    let Some(ext) = ext_lower(path) else {
+        return MediaKind::Other;
+    };
+    if IMAGE_EXTS.iter().any(|e| *e == ext) {
+        return MediaKind::Image;
+    }
+    if VIDEO_EXTS.iter().any(|e| *e == ext) {
+        return MediaKind::Video;
+    }
+    MediaKind::Other
+}
 
 fn ext_lower(path: &Path) -> Option<String> {
     path.extension()
@@ -146,6 +167,130 @@ fn parse_mvhd_creation_ms(file: &mut File) -> Option<u64> {
     Some((secs_since_1904 - MAC_TO_UNIX_SECS) * 1000)
 }
 
+/// Scan a filename stem for an embedded date (and optional time), returning
+/// it as Unix ms. Used as a fallback when metadata has no capture date — many
+/// camera exports and screenshots encode the date in the name itself.
+///
+/// Accepted patterns (year must be 1970–2100):
+///   YYYY-MM-DD, YYYY_MM_DD, YYYYMMDD
+/// Optionally followed by a separator (`-`, `_`, ` `, or `T`) and a time:
+///   HHMMSS, HH-MM-SS, HH_MM_SS, HH:MM:SS
+/// If no time is present, defaults to noon UTC to avoid day-boundary issues.
+pub fn read_filename_date_ms(path: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    parse_filename_date_ms(stem)
+}
+
+fn parse_filename_date_ms(stem: &str) -> Option<u64> {
+    let bytes = stem.as_bytes();
+    let n = bytes.len();
+    if n < 8 {
+        return None;
+    }
+    let mut i = 0;
+    while i + 8 <= n {
+        // Don't match digits embedded inside a longer digit run (e.g. avoid
+        // pulling "20240101" out of "120240101"). Require a non-digit (or
+        // start-of-string) immediately before the year.
+        if i > 0 && bytes[i - 1].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        if let Some((ms, consumed)) = try_date_at(bytes, i) {
+            // Also ensure the date isn't followed by a digit that would make
+            // the year/day part of a longer number we mis-parsed.
+            let after = i + consumed;
+            if after < n && bytes[after].is_ascii_digit() {
+                // Special case: 8-digit form followed by a digit means we're
+                // inside a longer run; skip.
+                i += 1;
+                continue;
+            }
+            return Some(ms);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn try_date_at(bytes: &[u8], i: usize) -> Option<(u64, usize)> {
+    let n = bytes.len();
+    let year = parse_n_digits(bytes, i, 4)?;
+    if !(1970..=2100).contains(&year) {
+        return None;
+    }
+    let (month, day, date_len) = if i + 10 <= n
+        && is_date_sep(bytes[i + 4])
+        && is_date_sep(bytes[i + 7])
+    {
+        let m = parse_n_digits(bytes, i + 5, 2)?;
+        let d = parse_n_digits(bytes, i + 8, 2)?;
+        (m, d, 10)
+    } else if i + 8 <= n {
+        let m = parse_n_digits(bytes, i + 4, 2)?;
+        let d = parse_n_digits(bytes, i + 6, 2)?;
+        (m, d, 8)
+    } else {
+        return None;
+    };
+
+    let (h, mi, s, end) = parse_optional_time(bytes, i + date_len)
+        .unwrap_or((12, 0, 0, i + date_len));
+    let ms = civil_to_unix_ms(year as i32, month, day, h, mi, s)?;
+    Some((ms, end - i))
+}
+
+/// Try to parse a time suffix starting at `start` (the separator byte before
+/// the time). Returns (hour, minute, second, end_index) on success.
+fn parse_optional_time(bytes: &[u8], start: usize) -> Option<(u32, u32, u32, usize)> {
+    let n = bytes.len();
+    if start >= n || !matches!(bytes[start], b'-' | b'_' | b' ' | b'T' | b't') {
+        return None;
+    }
+    let t = start + 1;
+    // HHMMSS (6 consecutive digits, not part of a longer run)
+    if t + 6 <= n
+        && (0..6).all(|k| bytes[t + k].is_ascii_digit())
+        && (t + 6 == n || !bytes[t + 6].is_ascii_digit())
+    {
+        let h = parse_n_digits(bytes, t, 2)?;
+        let mi = parse_n_digits(bytes, t + 2, 2)?;
+        let s = parse_n_digits(bytes, t + 4, 2)?;
+        return Some((h, mi, s, t + 6));
+    }
+    // HH[sep]MM[sep]SS where sep is - _ :
+    if t + 8 <= n {
+        let sep1 = bytes[t + 2];
+        let sep2 = bytes[t + 5];
+        if matches!(sep1, b'-' | b'_' | b':') && sep1 == sep2 {
+            let h = parse_n_digits(bytes, t, 2)?;
+            let mi = parse_n_digits(bytes, t + 3, 2)?;
+            let s = parse_n_digits(bytes, t + 6, 2)?;
+            return Some((h, mi, s, t + 8));
+        }
+    }
+    None
+}
+
+fn is_date_sep(b: u8) -> bool {
+    b == b'-' || b == b'_'
+}
+
+fn parse_n_digits(bytes: &[u8], start: usize, n: usize) -> Option<u32> {
+    if start + n > bytes.len() {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for k in 0..n {
+        let c = bytes[start + k];
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (c - b'0') as u32;
+    }
+    Some(v)
+}
+
 /// Returns the original-capture timestamp (ms since Unix epoch) read from
 /// media metadata, or None if the format is unsupported or no tag is present.
 pub fn read_metadata_ms(path: &Path) -> Option<u64> {
@@ -232,6 +377,76 @@ mod tests {
     fn read_metadata_ms_extensionless_returns_none() {
         let path = Path::new("/nonexistent/no_ext");
         assert!(read_metadata_ms(path).is_none());
+    }
+
+    #[test]
+    fn filename_date_dash_separated() {
+        let ms = parse_filename_date_ms("2025-02-11-0005").unwrap();
+        // 2025-02-11 12:00:00 UTC
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn filename_date_underscore_separated() {
+        let ms = parse_filename_date_ms("2025_02_11").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn filename_date_compact_eight_digit() {
+        let ms = parse_filename_date_ms("20250211-0005").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn filename_date_with_compact_time() {
+        let ms = parse_filename_date_ms("IMG_20250211_143015").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 14, 30, 15).unwrap());
+    }
+
+    #[test]
+    fn filename_date_with_separated_time() {
+        let ms = parse_filename_date_ms("2025-02-11T14-30-15").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 14, 30, 15).unwrap());
+    }
+
+    #[test]
+    fn filename_date_embedded_mid_name() {
+        let ms = parse_filename_date_ms("screenshot-2025-02-11-at-3pm").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn filename_date_no_date_returns_none() {
+        assert!(parse_filename_date_ms("vacation").is_none());
+        assert!(parse_filename_date_ms("IMG_0001").is_none());
+    }
+
+    #[test]
+    fn filename_date_invalid_month_day_returns_none() {
+        assert!(parse_filename_date_ms("1234-56-78").is_none());
+        assert!(parse_filename_date_ms("2025-13-01").is_none());
+        assert!(parse_filename_date_ms("2025-02-32").is_none());
+    }
+
+    #[test]
+    fn filename_date_pre_1970_year_returns_none() {
+        assert!(parse_filename_date_ms("1899-01-01").is_none());
+        assert!(parse_filename_date_ms("1969-12-31").is_none());
+    }
+
+    #[test]
+    fn filename_date_avoids_longer_digit_runs() {
+        // Don't pull 20250211 out of 120250211 / 202502115
+        assert!(parse_filename_date_ms("120250211").is_none());
+        assert!(parse_filename_date_ms("202502115").is_none());
+    }
+
+    #[test]
+    fn read_filename_date_ms_via_path() {
+        let path = Path::new("/some/dir/2025-02-11-0005.jpg");
+        let ms = read_filename_date_ms(path).unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
     }
 
     #[test]

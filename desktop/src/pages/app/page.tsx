@@ -12,31 +12,49 @@ import StatsFooter from './components/StatsFooter';
 
 export default function AppPage() {
   const [activeTab, setActiveTab] = useState('scan');
+  const [visited, setVisited] = useState<Set<string>>(() => new Set(['scan']));
   const { groupId } = useParams();
 
-  const handleNavigateToResults = useCallback(() => {
-    setActiveTab('results');
+  const handleTabChange = useCallback((tab: string) => {
+    setActiveTab(tab);
+    setVisited((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
   }, []);
+
+  const handleNavigateToResults = useCallback(() => {
+    handleTabChange('results');
+  }, [handleTabChange]);
 
   const handleNavigateToScan = useCallback(() => {
-    setActiveTab('scan');
-  }, []);
+    handleTabChange('scan');
+  }, [handleTabChange]);
 
-  const views: Record<string, React.ReactNode> = {
-    scan: <ScanView onNavigateToResults={handleNavigateToResults} />,
-    results: <ResultsView onNavigateToScan={handleNavigateToScan} />,
-    organize: <OrganizeView />,
-    filters: <FiltersView />,
-    settings: <SettingsView />,
-    about: <AboutView />,
-  };
+  const views: { id: string; node: React.ReactNode }[] = [
+    { id: 'scan', node: <ScanView onNavigateToResults={handleNavigateToResults} /> },
+    { id: 'results', node: <ResultsView onNavigateToScan={handleNavigateToScan} /> },
+    { id: 'organize', node: <OrganizeView /> },
+    { id: 'filters', node: <FiltersView /> },
+    { id: 'settings', node: <SettingsView /> },
+    { id: 'about', node: <AboutView /> },
+  ];
 
   return (
     <div className="h-screen w-full flex bg-[#1f1008] overflow-hidden">
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+      <Sidebar activeTab={activeTab} onTabChange={handleTabChange} />
       <main className="flex-1 overflow-y-auto p-5 md:p-8 pb-10 md:pb-16">
-        {groupId ? <CompareView /> : views[activeTab]}
-        {!groupId && activeTab === 'scan' && <StatsFooter />}
+        {groupId ? (
+          <CompareView />
+        ) : (
+          <>
+            {views.map(({ id, node }) =>
+              visited.has(id) ? (
+                <div key={id} style={{ display: activeTab === id ? undefined : 'none' }}>
+                  {node}
+                </div>
+              ) : null,
+            )}
+            {activeTab === 'scan' && <StatsFooter />}
+          </>
+        )}
       </main>
     </div>
   );

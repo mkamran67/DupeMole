@@ -22,10 +22,22 @@ pub enum OrganizeOp {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Granularity {
     pub year: bool,
     pub month: bool,
     pub day: bool,
+    #[serde(default)]
+    pub separate_media: bool,
+    #[serde(default)]
+    pub unknown_bucket: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DateSource {
+    Metadata,
+    Filename,
+    Fallback,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -80,15 +92,38 @@ fn unix_ms_to_civil(ms: u64) -> (i32, u32, u32) {
     (y, m, d)
 }
 
-fn modified_ms(path: &Path) -> Option<u64> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let dur = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(dur.as_millis() as u64)
+/// Older of created/modified, falling back to whichever is available.
+/// `Metadata::created()` is not supported on every platform / filesystem —
+/// the `.ok()` chain degrades gracefully to modified-only.
+fn fallback_ms(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let m = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    let c = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    match (m, c) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => 0,
+    }
 }
 
-fn resolved_date_ms(path: &Path) -> Option<u64> {
-    crate::media_date::read_metadata_ms(path).or_else(|| modified_ms(path))
+fn resolved_date(path: &Path) -> (u64, DateSource) {
+    if let Some(ms) = crate::media_date::read_metadata_ms(path) {
+        return (ms, DateSource::Metadata);
+    }
+    if let Some(ms) = crate::media_date::read_filename_date_ms(path) {
+        return (ms, DateSource::Filename);
+    }
+    (fallback_ms(path), DateSource::Fallback)
 }
 
 fn ext_lower(path: &Path) -> Option<String> {
@@ -103,8 +138,32 @@ fn extension_allowed(path: &Path, allow: &Option<Vec<String>>) -> bool {
     allow.iter().any(|a| a.eq_ignore_ascii_case(&ext))
 }
 
-fn build_subdir(target: &Path, ms: u64, g: &Granularity) -> PathBuf {
+fn build_subdir(
+    target: &Path,
+    ms: u64,
+    kind: crate::media_date::MediaKind,
+    src: DateSource,
+    g: &Granularity,
+) -> PathBuf {
+    use crate::media_date::MediaKind;
     let mut out = target.to_path_buf();
+
+    // Photos/Videos split comes first when enabled.
+    if g.separate_media {
+        match kind {
+            MediaKind::Image => out.push("Photos"),
+            MediaKind::Video => out.push("Videos"),
+            MediaKind::Other => out.push("Other"),
+        }
+    }
+
+    // Unknown nests inside the media folder when both toggles are on
+    // (→ Photos/Unknown/..., Videos/Unknown/...). When only unknown_bucket is
+    // on, it's a flat top-level Unknown/ bucket.
+    if g.unknown_bucket && src == DateSource::Fallback {
+        out.push("Unknown");
+    }
+
     if !g.year {
         return out;
     }
@@ -336,8 +395,9 @@ pub fn start_organize(
                 if cancel.0.load(Ordering::SeqCst) {
                     return;
                 }
-                let ms = resolved_date_ms(src).unwrap_or(0);
-                let dir = build_subdir(&target_path, ms, &granularity);
+                let (ms, date_src) = resolved_date(src);
+                let kind = crate::media_date::media_kind(src);
+                let dir = build_subdir(&target_path, ms, kind, date_src, &granularity);
                 if let Err(e) = std::fs::create_dir_all(&dir) {
                     errors.lock().unwrap().push(OrganizeError {
                         path: src.display().to_string(),
@@ -466,18 +526,108 @@ mod tests {
         assert_eq!((y, m, d), (2000, 2, 29));
     }
 
+    use crate::media_date::MediaKind;
+
+    fn sub(target: &Path, ms: u64, g: &Granularity) -> PathBuf {
+        build_subdir(target, ms, MediaKind::Other, DateSource::Metadata, g)
+    }
+
     #[test]
     fn build_subdir_respects_granularity() {
         let target = PathBuf::from("/tmp/x");
         let ms = 1_710_504_000_000; // 2024-03-15
-        let g = Granularity { year: true, month: true, day: true };
-        assert_eq!(build_subdir(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March/15"));
-        let g = Granularity { year: true, month: true, day: false };
-        assert_eq!(build_subdir(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March"));
-        let g = Granularity { year: true, month: false, day: false };
-        assert_eq!(build_subdir(&target, ms, &g), PathBuf::from("/tmp/x/2024"));
-        let g = Granularity { year: false, month: false, day: false };
-        assert_eq!(build_subdir(&target, ms, &g), target);
+        let g = Granularity { year: true, month: true, day: true, ..Default::default() };
+        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March/15"));
+        let g = Granularity { year: true, month: true, day: false, ..Default::default() };
+        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March"));
+        let g = Granularity { year: true, month: false, day: false, ..Default::default() };
+        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024"));
+        let g = Granularity { year: false, month: false, day: false, ..Default::default() };
+        assert_eq!(sub(&target, ms, &g), target);
+    }
+
+    #[test]
+    fn build_subdir_separate_media_splits_photos_videos_other() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000; // 2024-03-15
+        let g = Granularity {
+            year: true, month: true, day: true,
+            separate_media: true, unknown_bucket: false,
+        };
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
+            PathBuf::from("/t/Photos/2024/03-March/15"),
+        );
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Video, DateSource::Metadata, &g),
+            PathBuf::from("/t/Videos/2024/03-March/15"),
+        );
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Other, DateSource::Metadata, &g),
+            PathBuf::from("/t/Other/2024/03-March/15"),
+        );
+    }
+
+    #[test]
+    fn build_subdir_unknown_bucket_only_for_fallback_source() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity {
+            year: true, month: true, day: false,
+            separate_media: false, unknown_bucket: true,
+        };
+        // Date came from EXIF — no Unknown prefix.
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
+            PathBuf::from("/t/2024/03-March"),
+        );
+        // Date came from filename — still not Unknown.
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Filename, &g),
+            PathBuf::from("/t/2024/03-March"),
+        );
+        // Date came from filesystem fallback — Unknown applies.
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
+            PathBuf::from("/t/Unknown/2024/03-March"),
+        );
+    }
+
+    #[test]
+    fn build_subdir_unknown_nests_inside_media_split() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity {
+            year: true, month: true, day: false,
+            separate_media: true, unknown_bucket: true,
+        };
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
+            PathBuf::from("/t/Photos/Unknown/2024/03-March"),
+        );
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Video, DateSource::Fallback, &g),
+            PathBuf::from("/t/Videos/Unknown/2024/03-March"),
+        );
+        // Dated image still goes straight into Photos with no Unknown.
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
+            PathBuf::from("/t/Photos/2024/03-March"),
+        );
+    }
+
+    #[test]
+    fn build_subdir_unknown_off_with_fallback_uses_regular_tree() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity {
+            year: true, month: true, day: false,
+            separate_media: false, unknown_bucket: false,
+        };
+        assert_eq!(
+            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
+            PathBuf::from("/t/2024/03-March"),
+        );
     }
 
     use std::io::Write;
@@ -518,15 +668,54 @@ mod tests {
         let target = PathBuf::from("/tmp/x");
         // 2024-01-15
         let ms = 1_705_276_800_000;
-        let g = Granularity { year: true, month: true, day: false };
-        assert_eq!(build_subdir(&target, ms, &g), PathBuf::from("/tmp/x/2024/01-January"));
+        let g = Granularity { year: true, month: true, day: false, ..Default::default() };
+        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/01-January"));
     }
 
     #[test]
     fn build_subdir_zero_ms_is_epoch() {
         let target = PathBuf::from("/t");
-        let g = Granularity { year: true, month: true, day: true };
-        assert_eq!(build_subdir(&target, 0, &g), PathBuf::from("/t/1970/01-January/01"));
+        let g = Granularity { year: true, month: true, day: true, ..Default::default() };
+        assert_eq!(sub(&target, 0, &g), PathBuf::from("/t/1970/01-January/01"));
+    }
+
+    #[test]
+    fn fallback_ms_returns_nonzero_for_real_file() {
+        let dir = tempdir();
+        let path = dir.join("file.bin");
+        write_file(&path, b"hello");
+        let ms = fallback_ms(&path);
+        // File was just written; ms should be a recent unix-ms value.
+        assert!(ms > 1_700_000_000_000, "expected recent ms, got {ms}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_ms_missing_file_returns_zero() {
+        let path = PathBuf::from("/definitely/does/not/exist-xyz.bin");
+        assert_eq!(fallback_ms(&path), 0);
+    }
+
+    #[test]
+    fn resolved_date_uses_fallback_when_no_metadata_or_filename() {
+        let dir = tempdir();
+        // Plain .bin: no image/video metadata, no parseable date in stem.
+        let path = dir.join("plain.bin");
+        write_file(&path, b"x");
+        let (_ms, src) = resolved_date(&path);
+        assert_eq!(src, DateSource::Fallback);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_date_uses_filename_when_no_metadata() {
+        let dir = tempdir();
+        // .bin won't have media metadata; filename has a parseable date.
+        let path = dir.join("2025-02-11-0005.bin");
+        write_file(&path, b"x");
+        let (_ms, src) = resolved_date(&path);
+        assert_eq!(src, DateSource::Filename);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

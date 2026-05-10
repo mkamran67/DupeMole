@@ -10,7 +10,12 @@ export const FILTER_TYPE_PRESETS: FilterTypePreset[] = [
     id: 'images',
     icon: 'ri-image-line',
     label: 'Images',
-    formats: ['JPG', 'JPEG', 'PNG', 'WEBP', 'RAW', 'HEIC', 'BMP', 'TIFF', 'GIF', 'SVG', 'AVIF'],
+    formats: [
+      'JPG', 'JPEG', 'PNG', 'WEBP', 'HEIC', 'HEIF', 'BMP', 'TIFF', 'TIF', 'GIF', 'SVG', 'AVIF',
+      'DNG', 'CR2', 'CR3', 'CRW', 'NEF', 'NRW', 'ARW', 'ARQ', 'SRF', 'SR2',
+      'RW2', 'ORF', 'RAF', 'PEF', '3FR', 'IIQ', 'MEF', 'X3F', 'ERF', 'RAW',
+      'DCR', 'KDC', 'MRW', 'RWL',
+    ],
   },
   {
     id: 'videos',

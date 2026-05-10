@@ -46,8 +46,16 @@ interface OrganizeCompleteEvent {
   };
 }
 
-function buildPreview(year: boolean, month: boolean, day: boolean): string {
+function buildPreview(
+  year: boolean,
+  month: boolean,
+  day: boolean,
+  separateMedia: boolean,
+  unknownBucket: boolean,
+): string {
   const parts: string[] = [];
+  if (separateMedia) parts.push('Photos');
+  if (unknownBucket) parts.push('Unknown');
   if (year) {
     parts.push('2024');
     if (month) {
@@ -72,6 +80,8 @@ export default function OrganizeView() {
   const [year, setYear] = useState(true);
   const [month, setMonth] = useState(true);
   const [day, setDay] = useState(false);
+  const [separateMedia, setSeparateMedia] = useState(false);
+  const [unknownBucket, setUnknownBucket] = useState(false);
   const [activeTypeIds, setActiveTypeIds] = useState<string[]>(
     initialTypeIds.length > 0 ? initialTypeIds : ['images', 'videos']
   );
@@ -168,7 +178,7 @@ export default function OrganizeView() {
         sources: sources.map((s) => s.path),
         target,
         op,
-        granularity: { year, month, day },
+        granularity: { year, month, day, separateMedia, unknownBucket },
         extensions,
         minSize: settings.filters.minSize,
         ignoreMacosFiles: settings.filters.ignoreMacosFiles,
@@ -179,7 +189,7 @@ export default function OrganizeView() {
       setRunning(false);
       setPhase(null);
     }
-  }, [sources, target, op, year, month, day, activeTypeIds, settings.filters.minSize, settings.filters.ignoreMacosFiles]);
+  }, [sources, target, op, year, month, day, separateMedia, unknownBucket, activeTypeIds, settings.filters.minSize, settings.filters.ignoreMacosFiles]);
 
   const cancel = useCallback(async () => {
     if (!activeId.current) return;
@@ -396,6 +406,20 @@ export default function OrganizeView() {
             { id: 'year', label: 'Year', checked: year, set: setYear, disabled: false },
             { id: 'month', label: 'Month', checked: month, set: setMonth, disabled: !year },
             { id: 'day', label: 'Day', checked: day, set: setDay, disabled: !month },
+            {
+              id: 'separateMedia',
+              label: 'Separate Photos & Videos',
+              checked: separateMedia,
+              set: setSeparateMedia,
+              disabled: false,
+            },
+            {
+              id: 'unknownBucket',
+              label: 'Unknown folder for undated files',
+              checked: unknownBucket,
+              set: setUnknownBucket,
+              disabled: false,
+            },
           ].map((c) => (
             <button
               key={c.id}
@@ -418,7 +442,7 @@ export default function OrganizeView() {
           </p>
           <p className="text-[#f5c542] text-sm font-mono truncate">
             {target ? `${basename(target)} / ` : ''}
-            {buildPreview(year, month, day)}
+            {buildPreview(year, month, day, separateMedia, unknownBucket)}
           </p>
         </div>
       </div>
@@ -454,7 +478,10 @@ export default function OrganizeView() {
           })}
         </div>
         <p className="text-white/30 text-[11px] mt-3 leading-relaxed">
-          Files with no readable capture date fall back to filesystem modified time.
+          Files with no readable capture date fall back to a date in the filename (e.g.{' '}
+          <span className="font-mono">2025-02-11-0005.jpg</span>), then to the older of the
+          filesystem created/modified times. Enable <span className="text-white/60">Unknown
+          folder</span> to route those files into a dedicated bucket instead.
         </p>
       </div>
 
