@@ -5,8 +5,11 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+/// Frontend distinguishes variants by exact PascalCase name (`'Auto'` and
+/// `{ N: number }`), so this enum must serialize that way. Do not add a
+/// `rename_all = "camelCase"` here — it would lowercase the variants and
+/// silently break the scan-threads dropdown round-trip.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub enum ScanThreads {
     Auto,
     N(u8),
@@ -52,7 +55,6 @@ impl Default for Filters {
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub confirm_delete: bool,
-    pub move_to_trash: bool,
     pub scan_threads: ScanThreads,
     pub notifications: bool,
     pub ignore_hidden: bool,
@@ -61,17 +63,12 @@ pub struct Settings {
     pub language: String,
     pub scan_filters: Filters,
     pub organize_filters: Filters,
-    /// When true, scanner reads EXIF/container metadata for images and videos
-    /// to determine the "original" capture date instead of filesystem mtime.
-    /// Slower but more accurate when files have been copied/moved.
-    pub use_metadata_dates: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             confirm_delete: true,
-            move_to_trash: true,
             scan_threads: ScanThreads::Auto,
             notifications: true,
             ignore_hidden: false,
@@ -80,7 +77,6 @@ impl Default for Settings {
             language: "English".to_string(),
             scan_filters: Filters::default(),
             organize_filters: Filters::default(),
-            use_metadata_dates: false,
         }
     }
 }
@@ -147,24 +143,32 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.confirm_delete, s.confirm_delete);
-        assert_eq!(back.move_to_trash, s.move_to_trash);
         assert_eq!(back.scan_threads, s.scan_threads);
         assert_eq!(back.language, s.language);
-        assert_eq!(back.use_metadata_dates, s.use_metadata_dates);
     }
 
     #[test]
     fn settings_default_values() {
         let s = Settings::default();
         assert!(s.confirm_delete);
-        assert!(s.move_to_trash);
         assert!(s.notifications);
         assert!(!s.ignore_hidden);
         assert!(!s.auto_scan);
         assert!(s.minimize_tray);
         assert_eq!(s.language, "English");
-        assert!(!s.use_metadata_dates);
         assert_eq!(s.scan_threads, ScanThreads::Auto);
+    }
+
+    #[test]
+    fn settings_ignores_legacy_move_to_trash_and_metadata_fields() {
+        let json = r#"{
+            "moveToTrash": false,
+            "useMetadataDates": true
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        // Both fields removed from struct; deserialization must succeed and
+        // produce defaults for everything else.
+        assert!(s.confirm_delete);
     }
 
     #[test]
@@ -210,6 +214,18 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: ScanThreads = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ScanThreads::N(4));
+    }
+
+    #[test]
+    fn scan_threads_serializes_in_pascal_case() {
+        // The frontend distinguishes variants by exact name `Auto` / `N`, so
+        // the wire format must keep PascalCase even though sibling structs
+        // use camelCase. Regression: rename_all camelCase here used to break
+        // the scan-threads dropdown round-trip.
+        let auto = serde_json::to_string(&ScanThreads::Auto).unwrap();
+        assert_eq!(auto, "\"Auto\"");
+        let n = serde_json::to_string(&ScanThreads::N(4)).unwrap();
+        assert_eq!(n, "{\"N\":4}");
     }
 
     #[test]

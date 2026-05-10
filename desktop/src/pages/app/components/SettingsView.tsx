@@ -1,4 +1,4 @@
-import { useSettings, type AppSettings, type ScanThreads } from '../../../settings/SettingsContext';
+import { isMacos, useSettings, type AppSettings, type ScanThreads } from '../../../settings/SettingsContext';
 
 interface SettingItem {
   id: string;
@@ -10,7 +10,9 @@ interface SettingItem {
   default: boolean | string;
 }
 
-const settings: SettingItem[] = [
+// Built once at module load — `isMacos()` is a stable platform check, so
+// filtering here (rather than at render time) keeps the render path simple.
+const settings: SettingItem[] = ([
   {
     id: 'confirm-delete',
     icon: 'ri-shield-check-line',
@@ -20,20 +22,12 @@ const settings: SettingItem[] = [
     default: true,
   },
   {
-    id: 'move-to-trash',
-    icon: 'ri-delete-bin-line',
-    title: 'Move to Trash',
-    description: 'Send duplicates to trash instead of permanently deleting',
-    type: 'toggle',
-    default: true,
-  },
-  {
     id: 'scan-threads',
     icon: 'ri-cpu-line',
     title: 'Scan Threads',
     description: 'Number of parallel threads for scanning',
     type: 'dropdown',
-    options: ['2', '4', '6', '8', 'Auto'],
+    options: scanThreadOptions(),
     default: 'Auto',
   },
   {
@@ -61,15 +55,6 @@ const settings: SettingItem[] = [
     default: false,
   },
   {
-    id: 'use-metadata-dates',
-    icon: 'ri-camera-lens-line',
-    title: 'Read Photo & Video Dates',
-    description:
-      'Use EXIF / video metadata for the original capture date instead of file modified time. Slower but more accurate.',
-    type: 'toggle',
-    default: false,
-  },
-  {
     id: 'minimize-tray',
     icon: 'ri-indeterminate-circle-line',
     title: 'Minimize to Tray',
@@ -86,19 +71,34 @@ const settings: SettingItem[] = [
     options: ['English', 'Spanish', 'French', 'German', 'Japanese'],
     default: 'English',
   },
-];
+] as SettingItem[]).filter((s) => (s.id === 'minimize-tray' ? isMacos() : true));
 
 const idToKey: Record<string, keyof AppSettings> = {
   'confirm-delete': 'confirmDelete',
-  'move-to-trash': 'moveToTrash',
   'scan-threads': 'scanThreads',
   'notifications': 'notifications',
   'ignore-hidden': 'ignoreHidden',
   'auto-scan': 'autoScan',
   'minimize-tray': 'minimizeTray',
   'language': 'language',
-  'use-metadata-dates': 'useMetadataDates',
 };
+
+/**
+ * Thread-count options for the scan-threads dropdown. Always offers "Auto"
+ * plus a few discrete counts up to the machine's logical CPU count so a user
+ * on a high-core machine doesn't max out at 8.
+ */
+function scanThreadOptions(): string[] {
+  const hw =
+    (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 8;
+  const cap = Math.max(2, Math.min(32, hw));
+  const choices = new Set<number>([2, 4, 6, 8]);
+  choices.add(cap);
+  const sorted = Array.from(choices)
+    .filter((n) => n <= cap)
+    .sort((a, b) => a - b);
+  return [...sorted.map(String), 'Auto'];
+}
 
 function scanThreadsToString(v: ScanThreads): string {
   return v === 'Auto' ? 'Auto' : String(v.N);

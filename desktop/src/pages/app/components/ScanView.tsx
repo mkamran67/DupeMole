@@ -427,7 +427,7 @@ function ScanCompleteModal({
 }
 
 export default function ScanView({ onNavigateToResults }: ScanViewProps) {
-  const { settings, updateSettings, updateScanFilters } = useSettings();
+  const { settings, updateScanFilters } = useSettings();
   const [showFilters, setShowFilters] = useState(false);
   const { setLatestScan } = useResults();
   const activeTypeIds = useMemo(
@@ -851,32 +851,6 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
             <FilterPanel kind="scan" />
           </div>
         )}
-      </div>
-
-      {/* Scan options */}
-      <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6 flex items-start gap-4">
-        <div className="w-9 h-9 rounded-lg bg-[#f5c542]/10 flex items-center justify-center shrink-0">
-          <i className="ri-camera-lens-line text-[#f5c542] text-sm"></i>
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-white text-sm font-semibold">Read Photo &amp; Video Dates</p>
-          <p className="text-white/40 text-xs mt-0.5 leading-relaxed">
-            Use EXIF / video metadata for the original capture date instead of file modified time. Slower but more accurate.
-          </p>
-        </div>
-        <button
-          onClick={() => updateSettings({ useMetadataDates: !settings.useMetadataDates })}
-          disabled={scanning}
-          className={`relative w-11 h-6 rounded-full transition-colors duration-300 cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${
-            settings.useMetadataDates ? 'bg-[#f5c542]' : 'bg-white/10'
-          }`}
-        >
-          <div
-            className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-300 ${
-              settings.useMetadataDates ? 'translate-x-6' : 'translate-x-1'
-            }`}
-          />
-        </button>
       </div>
 
       {/* Directories List */}

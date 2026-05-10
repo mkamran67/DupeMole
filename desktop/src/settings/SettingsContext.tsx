@@ -44,7 +44,6 @@ export function isMacos(): boolean {
 
 export interface AppSettings {
   confirmDelete: boolean;
-  moveToTrash: boolean;
   scanThreads: ScanThreads;
   notifications: boolean;
   ignoreHidden: boolean;
@@ -53,12 +52,10 @@ export interface AppSettings {
   language: string;
   scanFilters: AppFilters;
   organizeFilters: AppFilters;
-  useMetadataDates: boolean;
 }
 
 const DEFAULTS: AppSettings = {
   confirmDelete: true,
-  moveToTrash: true,
   scanThreads: 'Auto',
   notifications: true,
   ignoreHidden: false,
@@ -67,7 +64,6 @@ const DEFAULTS: AppSettings = {
   language: 'English',
   scanFilters: DEFAULT_FILTERS,
   organizeFilters: DEFAULT_FILTERS,
-  useMetadataDates: false,
 };
 
 interface SettingsContextValue {

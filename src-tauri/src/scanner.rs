@@ -107,14 +107,12 @@ fn modified_ms(path: &Path) -> Option<u64> {
     Some(duration.as_millis() as u64)
 }
 
-/// Resolve the timestamp the UI treats as "original date". When metadata
-/// reads are enabled and the file is a supported image/video, prefer the
-/// EXIF/container capture date; otherwise fall back to filesystem mtime.
-fn resolved_date_ms(path: &Path, use_metadata: bool) -> Option<u64> {
-    if use_metadata {
-        if let Some(ms) = crate::media_date::read_metadata_ms(path) {
-            return Some(ms);
-        }
+/// Resolve the timestamp the UI treats as "original date": prefer the
+/// EXIF/container capture date for supported image/video files; fall back
+/// to filesystem mtime otherwise.
+fn resolved_date_ms(path: &Path) -> Option<u64> {
+    if let Some(ms) = crate::media_date::read_metadata_ms(path) {
+        return Some(ms);
     }
     modified_ms(path)
 }
@@ -693,33 +691,44 @@ where
     }
 
     let mut final_snapshot = build_snapshot(&final_by_key, total_files, &extension_counts);
-    resolve_dates_in_place(&pool, &mut final_snapshot, settings.use_metadata_dates);
+    resolve_dates_in_place(&pool, &mut final_snapshot);
     final_snapshot
 }
 
-fn resolve_dates_in_place(
-    pool: &rayon::ThreadPool,
-    scan: &mut ScanComplete,
-    use_metadata_dates: bool,
-) {
+fn resolve_dates_in_place(pool: &rayon::ThreadPool, scan: &mut ScanComplete) {
     pool.install(|| {
         scan.groups.par_iter_mut().for_each(|group| {
             for file in group.files.iter_mut() {
                 if file.modified_ms.is_none() {
-                    file.modified_ms = resolved_date_ms(&file.path, use_metadata_dates);
+                    file.modified_ms = resolved_date_ms(&file.path);
                 }
             }
         });
     });
 }
 
+/// Resolve a [`ScanThreads`] setting to the concrete worker count to use.
+///
+/// `Auto` resolves to the machine's available parallelism (logical CPUs),
+/// clamped to at least 1. `N(0)` is treated as `Auto` for forward-compat
+/// with older settings files. `N(n)` clamps any explicit count to `[1, 256]`
+/// so a corrupt setting can't cause rayon to spin up an absurd pool.
+pub fn resolve_thread_count(threads: &ScanThreads) -> usize {
+    fn auto() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    }
+    match threads {
+        ScanThreads::Auto => auto(),
+        ScanThreads::N(0) => auto(),
+        ScanThreads::N(n) => (*n as usize).min(256),
+    }
+}
+
 fn build_pool(threads: &ScanThreads) -> rayon::ThreadPool {
-    let n = match threads {
-        ScanThreads::Auto => 0,
-        ScanThreads::N(n) => *n as usize,
-    };
     rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
+        .num_threads(resolve_thread_count(threads))
         .build()
         .expect("failed to build rayon pool")
 }
@@ -732,6 +741,39 @@ mod tests {
     fn write_file(path: &Path, bytes: &[u8]) {
         let mut f = File::create(path).unwrap();
         f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn resolve_thread_count_auto_is_at_least_one() {
+        let n = resolve_thread_count(&ScanThreads::Auto);
+        assert!(n >= 1, "Auto must resolve to at least 1, got {n}");
+    }
+
+    #[test]
+    fn resolve_thread_count_auto_matches_available_parallelism() {
+        let expected = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert_eq!(resolve_thread_count(&ScanThreads::Auto), expected);
+    }
+
+    #[test]
+    fn resolve_thread_count_explicit_n_is_honored() {
+        assert_eq!(resolve_thread_count(&ScanThreads::N(1)), 1);
+        assert_eq!(resolve_thread_count(&ScanThreads::N(4)), 4);
+        assert_eq!(resolve_thread_count(&ScanThreads::N(8)), 8);
+    }
+
+    #[test]
+    fn resolve_thread_count_zero_falls_back_to_auto() {
+        let auto = resolve_thread_count(&ScanThreads::Auto);
+        assert_eq!(resolve_thread_count(&ScanThreads::N(0)), auto);
+    }
+
+    #[test]
+    fn build_pool_uses_resolved_count() {
+        let pool = build_pool(&ScanThreads::N(3));
+        assert_eq!(pool.current_num_threads(), 3);
     }
 
     #[test]

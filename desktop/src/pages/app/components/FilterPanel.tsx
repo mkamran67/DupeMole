@@ -48,6 +48,18 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
   const [customExt, setCustomExt] = useState(customExtFromFilters);
   useEffect(() => setCustomExt(customExtFromFilters), [customExtFromFilters]);
 
+  // Staged input for the custom-extension picker — committed only on click/Enter.
+  const [customExtInput, setCustomExtInput] = useState('');
+
+  // Custom extensions (those not covered by any preset), uppercased and unique.
+  const customExtensions = useMemo(() => {
+    return customExt
+      .split(',')
+      .map((s) => s.trim().replace(/^\./, '').toUpperCase())
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i);
+  }, [customExt]);
+
   const sizePreset = sizePresetLabel(filters.minSize, filters.maxSize);
   const datePreset = datePresetLabel(filters.modifiedAfterMs);
 
@@ -99,11 +111,6 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       ? activeTypes.filter((t) => t !== id)
       : [...activeTypes, id];
     writeAllowlist(next, customExt);
-  };
-
-  const onCustomExtChange = (v: string) => {
-    setCustomExt(v);
-    writeAllowlist(activeTypes, v);
   };
 
   const setSizePreset = (label: string) => {
@@ -174,14 +181,53 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
     };
   }, [editingType]);
 
-  const selectedExtensions = useMemo(() => {
+  const presetExtensions = useMemo(() => {
     if (!filters.extensions) {
       const all: string[] = [];
       filterTypes.forEach((ft) => ft.formats.forEach((f) => all.push(f)));
       return [...new Set(all)];
     }
-    return [...new Set(filters.extensions.map((e) => e.toUpperCase()))];
-  }, [filters.extensions, filterTypes]);
+    const customSet = new Set(customExtensions.map((e) => e.toLowerCase()));
+    return [
+      ...new Set(
+        filters.extensions
+          .map((e) => e.toLowerCase())
+          .filter((e) => !customSet.has(e))
+          .map((e) => e.toUpperCase())
+      ),
+    ];
+  }, [filters.extensions, filterTypes, customExtensions]);
+
+  const commitCustomExt = () => {
+    const raw = customExtInput.trim();
+    if (!raw) return;
+    const tokens = raw
+      .split(',')
+      .map((s) => s.trim().replace(/^\./, '').toLowerCase())
+      .filter(Boolean);
+    if (tokens.length === 0) return;
+    const existing = customExt
+      .split(',')
+      .map((s) => s.trim().replace(/^\./, '').toLowerCase())
+      .filter(Boolean);
+    const merged = Array.from(new Set([...existing, ...tokens]));
+    const next = merged.map((e) => `.${e}`).join(', ');
+    setCustomExt(next);
+    setCustomExtInput('');
+    writeAllowlist(activeTypes, next);
+  };
+
+  const removeCustomExt = (ext: string) => {
+    const target = ext.toLowerCase();
+    const remaining = customExt
+      .split(',')
+      .map((s) => s.trim().replace(/^\./, '').toLowerCase())
+      .filter(Boolean)
+      .filter((e) => e !== target);
+    const next = remaining.map((e) => `.${e}`).join(', ');
+    setCustomExt(next);
+    writeAllowlist(activeTypes, next);
+  };
 
   const addIgnoredFolder = () => {
     if (!newFolder.trim()) return;
@@ -257,16 +303,31 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">
           {filters.extensions ? 'Selected Extensions' : 'All Extensions Included'}
         </p>
-        {selectedExtensions.length === 0 ? (
+        {presetExtensions.length === 0 && customExtensions.length === 0 ? (
           <p className="text-white/25 text-xs">No file types selected. Add at least one category or a custom extension.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {selectedExtensions.map((ext) => (
+            {presetExtensions.map((ext) => (
               <span
-                key={ext}
+                key={`p-${ext}`}
                 className="text-xs font-medium px-2.5 py-1 rounded-full border border-[#f5c542]/30 bg-[#f5c542]/10 text-[#f5c542]"
               >
                 .{ext.toLowerCase()}
+              </span>
+            ))}
+            {customExtensions.map((ext) => (
+              <span
+                key={`c-${ext}`}
+                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border border-[#7ab8f5]/40 bg-[#7ab8f5]/10 text-[#7ab8f5]"
+              >
+                .{ext.toLowerCase()}
+                <button
+                  onClick={() => removeCustomExt(ext)}
+                  className="w-4 h-4 rounded-full flex items-center justify-center text-[#7ab8f5]/60 hover:text-[#c45c5c] transition-colors duration-200 cursor-pointer"
+                  title={`Remove .${ext.toLowerCase()}`}
+                >
+                  <i className="ri-close-line text-[10px]"></i>
+                </button>
               </span>
             ))}
           </div>
@@ -365,24 +426,32 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
 
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Custom Extensions</p>
-        <div className="relative">
+        <div className="flex gap-2">
           <input
             type="text"
             placeholder=".custom, .ext, .log ..."
-            value={customExt}
-            onChange={(e) => onCustomExtChange(e.target.value)}
-            className="w-full text-sm px-4 py-3 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
+            value={customExtInput}
+            onChange={(e) => setCustomExtInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitCustomExt();
+              }
+            }}
+            className="flex-1 text-sm px-4 py-3 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
           />
-          {customExt && (
-            <button
-              onClick={() => onCustomExtChange('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white/60 transition-colors duration-200 cursor-pointer"
-            >
-              <i className="ri-close-line text-xs"></i>
-            </button>
-          )}
+          <button
+            onClick={commitCustomExt}
+            disabled={!customExtInput.trim()}
+            className="w-12 rounded-lg bg-[#f5c542] text-[#2c1810] flex items-center justify-center hover:bg-[#e5b535] transition-colors duration-200 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+            title="Add custom extensions"
+          >
+            <i className="ri-add-line text-lg"></i>
+          </button>
         </div>
-        <p className="text-white/25 text-[11px] mt-2">Comma-separated list of custom file extensions.</p>
+        <p className="text-white/25 text-[11px] mt-2">
+          Type one or more comma-separated extensions and press Enter or click +.
+        </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -416,14 +485,17 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
                 onChange={(e) => onMinSizeInputChange(e.target.value)}
                 className="flex-1 min-w-0 text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
               />
-              <select
-                value={minSizeUnit}
-                onChange={(e) => setMinSizeUnit(e.target.value as 'KB' | 'MB')}
-                className="text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200 cursor-pointer"
-              >
-                <option value="KB">KB</option>
-                <option value="MB">MB</option>
-              </select>
+              <div className="relative">
+                <select
+                  value={minSizeUnit}
+                  onChange={(e) => setMinSizeUnit(e.target.value as 'KB' | 'MB')}
+                  className="text-sm pl-3 pr-8 py-2 rounded-lg border border-white/10 bg-white/5 text-white focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200 cursor-pointer appearance-none"
+                >
+                  <option value="KB" className="bg-[#3d2418]">KB</option>
+                  <option value="MB" className="bg-[#3d2418]">MB</option>
+                </select>
+                <i className="ri-arrow-down-s-line absolute right-2 top-1/2 -translate-y-1/2 text-white/30 text-sm pointer-events-none"></i>
+              </div>
               {filters.minSize != null && (
                 <button
                   onClick={() => updateFilters({ minSize: null })}
