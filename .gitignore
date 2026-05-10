@@ -46,6 +46,7 @@ $RECYCLE.BIN/
 # --- Env / secrets ---
 .env
 .env.*
+.env.release
 !.env.example
 *.pem
 *.key

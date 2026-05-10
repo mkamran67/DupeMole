@@ -25,13 +25,18 @@ interface Directory {
   scanned: boolean;
 }
 
+type ScanPhase = 'discovery' | 'hashing' | 'verifying';
+
 interface ScanProgressEvent {
   scanId: string;
   progress: {
     processed: number;
     total: number;
     currentPath: string | null;
-    phase: 'walking' | 'hashing';
+    phase: ScanPhase;
+    folderIndex?: number;
+    folderTotal?: number;
+    folderPath?: string | null;
   };
 }
 
@@ -54,6 +59,19 @@ interface ScanCompleteEvent {
   };
 }
 
+
+function formatEta(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
 
 function bucketFormatsLabel(id: string): string {
   const preset = FILTER_TYPE_PRESETS.find((p) => p.id === id);
@@ -417,10 +435,12 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
 
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState<'walking' | 'hashing' | null>(null);
+  const [phase, setPhase] = useState<ScanPhase | null>(null);
   const [phaseProcessed, setPhaseProcessed] = useState(0);
   const [phaseTotal, setPhaseTotal] = useState(0);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
+  const etaRef = useRef<number | null>(null);
   const [directories, setDirectories] = useState<Directory[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [scanComplete, setScanComplete] = useState(false);
@@ -507,10 +527,12 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
     if (directories.length === 0) return;
     setScanning(true);
     setProgress(0);
-    setPhase('walking');
+    setPhase('discovery');
     setPhaseProcessed(0);
     setPhaseTotal(0);
     setCurrentPath(null);
+    setEtaSeconds(null);
+    etaRef.current = null;
     setScanComplete(false);
     setExtensionCounts(null);
     setDirectories((prev) => prev.map((d) => ({ ...d, progress: 0, scanned: false, files: 0 })));
@@ -539,28 +561,83 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
 
     listen<ScanProgressEvent>('scan://progress', (e) => {
       if (e.payload.scanId !== activeScanId.current) return;
-      const { processed, total, phase: ph, currentPath: cp } = e.payload.progress;
+      const {
+        processed,
+        total,
+        phase: ph,
+        currentPath: cp,
+        folderIndex,
+        folderTotal,
+      } = e.payload.progress;
       setPhase(ph);
       setPhaseProcessed(processed);
       setPhaseTotal(total);
       setCurrentPath(cp);
-      // Walking owns 0–30% via a soft asymptote on file count (no known total).
-      // Hashing owns 30–100% with a real ratio.
-      const pct =
-        ph === 'walking'
-          ? 30 * (1 - Math.exp(-processed / 5000))
-          : total === 0
-            ? 100
-            : 30 + (processed / total) * 70;
-      const clamped = Math.min(99, pct);
+
+      // Main bar: weighted across all stages.
+      //   discovery → 0–30%  (asymptotic — total unknown during walk)
+      //   hashing   → 30–85%
+      //   verifying → 85–99%
+      const folderFrac =
+        folderIndex !== undefined && folderTotal && folderTotal > 0
+          ? Math.min(1, folderIndex / folderTotal)
+          : 0;
+      const withinFolderAsymptote = 1 - Math.exp(-processed / 5000);
+      const folderSpan = folderTotal && folderTotal > 0 ? 1 / folderTotal : 1;
+
+      let pct: number;
+      if (ph === 'discovery') {
+        pct = 30 * (folderFrac + withinFolderAsymptote * folderSpan);
+      } else if (ph === 'hashing') {
+        pct = 30 + (total > 0 ? processed / total : 0) * 55;
+      } else {
+        // verifying
+        pct = 85 + (total > 0 ? processed / total : 0) * 14;
+      }
+      const clamped = Math.max(0, Math.min(99, pct));
       setProgress(clamped);
-      setDirectories((prev) => prev.map((d) => ({ ...d, progress: clamped })));
+
+      // ETA — derive from the same weighted progress curve. Hidden until
+      // there is enough signal (≥5%) to avoid wild divide-by-near-zero
+      // estimates. Smoothed with an EMA so phase transitions don't make
+      // the displayed value jitter.
+      const MIN_PROGRESS_FOR_ETA = 5;
+      if (clamped >= MIN_PROGRESS_FOR_ETA) {
+        const elapsed = (Date.now() - scanStartTime.current) / 1000;
+        const rawEta = (elapsed * (100 - clamped)) / clamped;
+        const alpha = 0.2;
+        const prev = etaRef.current;
+        const smoothed = prev === null ? rawEta : alpha * rawEta + (1 - alpha) * prev;
+        etaRef.current = smoothed;
+        setEtaSeconds(smoothed);
+      }
+
+      // Per-folder bars: only meaningful during discovery. Each folder fills
+      // independently; hashing/verifying are global, so we keep all bars at
+      // 100% (discovery for that folder is done).
+      if (ph === 'discovery') {
+        setDirectories((prev) =>
+          prev.map((d, i) => {
+            if (folderIndex === undefined) return { ...d, progress: clamped };
+            if (i < folderIndex) return { ...d, progress: 100 };
+            if (i > folderIndex) return { ...d, progress: 0 };
+            const dirPct = 99 * (1 - Math.exp(-processed / 5000));
+            return { ...d, progress: Math.min(99, dirPct) };
+          })
+        );
+      } else {
+        setDirectories((prev) =>
+          prev.map((d) => ({ ...d, progress: 100 }))
+        );
+      }
     }).then((u) => (unlistenProgress = u));
 
     listen<ScanCompleteEvent>('scan://complete', (e) => {
       if (e.payload.scanId !== activeScanId.current) return;
       const { result } = e.payload;
       const elapsed = ((Date.now() - scanStartTime.current) / 1000).toFixed(1);
+      setEtaSeconds(null);
+      etaRef.current = null;
       setScanStats({
         totalFiles: result.totalFiles,
         duplicateGroups: result.groups.length,
@@ -833,13 +910,22 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
             <span className="text-white text-sm font-medium">
-              {phase === 'walking'
+              {phase === 'discovery'
                 ? 'Discovering files'
                 : phase === 'hashing'
-                  ? 'Hashing & comparing'
-                  : 'Overall Progress'}
+                  ? 'Hashing'
+                  : phase === 'verifying'
+                    ? 'Verifying duplicates'
+                    : 'Overall Progress'}
             </span>
-            <span className="text-[#f5c542] text-sm font-semibold">{Math.round(progress)}%</span>
+            <span className="text-[#f5c542] text-sm font-semibold">
+              {Math.round(progress)}%
+              {etaSeconds !== null && (
+                <span className="text-white/50 font-normal ml-2">
+                  · ~{formatEta(etaSeconds)} left
+                </span>
+              )}
+            </span>
           </div>
           <div className="h-3 bg-white/10 rounded-full overflow-hidden">
             <div
@@ -849,10 +935,17 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
           </div>
           <div className="flex items-center justify-between mt-3 gap-4">
             <p className="text-white/40 text-xs font-mono truncate">
-              {currentPath ?? (phase === 'walking' ? 'Walking directories…' : 'Preparing…')}
+              {currentPath ??
+                (phase === 'discovery'
+                  ? 'Walking directories…'
+                  : phase === 'hashing'
+                    ? 'Hashing files…'
+                    : phase === 'verifying'
+                      ? 'Verifying duplicate hashes…'
+                      : 'Preparing…')}
             </p>
             <p className="text-white/40 text-xs font-mono shrink-0">
-              {phase === 'walking'
+              {phase === 'discovery'
                 ? `${phaseProcessed.toLocaleString()} found`
                 : phase === 'hashing'
                   ? `${phaseProcessed.toLocaleString()} / ${phaseTotal.toLocaleString()}`

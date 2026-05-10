@@ -20,6 +20,7 @@ export interface AppFilters {
   modifiedAfterMs: number | null;
   modifiedBeforeMs: number | null;
   includeSubdirs: boolean;
+  ignoreMacosFiles: boolean;
 }
 
 export const DEFAULT_FILTERS: AppFilters = {
@@ -31,7 +32,15 @@ export const DEFAULT_FILTERS: AppFilters = {
   modifiedAfterMs: null,
   modifiedBeforeMs: null,
   includeSubdirs: true,
+  ignoreMacosFiles: false,
 };
+
+export function isMacos(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  return /Mac/i.test(platform) || /Mac OS X|Macintosh/i.test(ua);
+}
 
 export interface AppSettings {
   confirmDelete: boolean;
@@ -76,9 +85,22 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     invoke<AppSettings>('get_settings')
       .then((s) => {
-        if (!cancelled) {
-          setSettings({ ...s, filters: { ...DEFAULT_FILTERS, ...(s.filters ?? {}) } });
-          setLoaded(true);
+        if (cancelled) return;
+        const loadedFilters = s.filters ?? ({} as Partial<AppFilters>);
+        const firstRunOnMac =
+          isMacos() && !Object.prototype.hasOwnProperty.call(loadedFilters, 'ignoreMacosFiles');
+        const mergedFilters: AppFilters = {
+          ...DEFAULT_FILTERS,
+          ...loadedFilters,
+          ...(firstRunOnMac ? { ignoreMacosFiles: true } : {}),
+        };
+        const merged: AppSettings = { ...s, filters: mergedFilters };
+        setSettings(merged);
+        setLoaded(true);
+        if (firstRunOnMac) {
+          invoke('update_settings', { new: merged }).catch((err) =>
+            console.error('failed to persist macOS-default filter', err)
+          );
         }
       })
       .catch((err) => {

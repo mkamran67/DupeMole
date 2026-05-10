@@ -1,5 +1,5 @@
 import { useMemo, useState, useRef, useEffect } from 'react';
-import { useSettings } from '../../../settings/SettingsContext';
+import { isMacos, useSettings } from '../../../settings/SettingsContext';
 import {
   FILTER_TYPE_PRESETS,
   SIZE_PRESETS,
@@ -53,6 +53,37 @@ export default function FiltersView() {
 
   const [newFolder, setNewFolder] = useState('');
   const [newType, setNewType] = useState('');
+
+  const showMacosToggle = useMemo(() => isMacos(), []);
+
+  // Minimum-size custom input: pick the larger unit that yields a clean value.
+  const initialMinUnit: 'KB' | 'MB' = useMemo(() => {
+    const n = filters.minSize;
+    if (n && n >= 1024 * 1024 && n % (1024 * 1024) === 0) return 'MB';
+    return 'KB';
+  }, [filters.minSize]);
+  const [minSizeUnit, setMinSizeUnit] = useState<'KB' | 'MB'>(initialMinUnit);
+  const minSizeInputValue = useMemo(() => {
+    if (filters.minSize == null) return '';
+    const div = minSizeUnit === 'MB' ? 1024 * 1024 : 1024;
+    const v = filters.minSize / div;
+    return Number.isInteger(v) ? String(v) : v.toFixed(2);
+  }, [filters.minSize, minSizeUnit]);
+
+  const onMinSizeInputChange = (raw: string) => {
+    if (raw.trim() === '') {
+      updateFilters({ minSize: null });
+      return;
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return;
+    const mult = minSizeUnit === 'MB' ? 1024 * 1024 : 1024;
+    updateFilters({ minSize: Math.round(n * mult) });
+  };
+
+  const onMinSizeUnitChange = (next: 'KB' | 'MB') => {
+    setMinSizeUnit(next);
+  };
 
   const writeAllowlist = (typeIds: string[], custom: string) => {
     const list = buildExtensionAllowlist(typeIds, custom, filterTypes);
@@ -377,6 +408,41 @@ export default function FiltersView() {
                 </button>
               ))}
             </div>
+            <div className="mt-4 pt-4 border-t border-white/5">
+              <p className="text-white/40 text-[11px] font-medium mb-2">Minimum Size</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  inputMode="decimal"
+                  placeholder="None"
+                  value={minSizeInputValue}
+                  onChange={(e) => onMinSizeInputChange(e.target.value)}
+                  className="flex-1 min-w-0 text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
+                />
+                <select
+                  value={minSizeUnit}
+                  onChange={(e) => onMinSizeUnitChange(e.target.value as 'KB' | 'MB')}
+                  className="text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200 cursor-pointer"
+                >
+                  <option value="KB">KB</option>
+                  <option value="MB">MB</option>
+                </select>
+                {filters.minSize != null && (
+                  <button
+                    onClick={() => updateFilters({ minSize: null })}
+                    className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white/60 transition-colors duration-200 cursor-pointer"
+                    title="Clear minimum size"
+                  >
+                    <i className="ri-close-line text-xs"></i>
+                  </button>
+                )}
+              </div>
+              <p className="text-white/25 text-[11px] mt-2">
+                Skip files smaller than this. Useful for ignoring tiny sidecar files.
+              </p>
+            </div>
           </div>
           <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
             <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Date Modified</p>
@@ -418,6 +484,31 @@ export default function FiltersView() {
               />
             </button>
           </div>
+          {showMacosToggle && (
+            <>
+              <div className="border-t border-white/5" />
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-white text-sm font-medium">Ignore macOS Metadata Files</p>
+                  <p className="text-white/30 text-xs mt-0.5">
+                    Skip <code className="text-white/40">._*</code>, <code className="text-white/40">.DS_Store</code>, and similar
+                  </p>
+                </div>
+                <button
+                  onClick={() => updateFilters({ ignoreMacosFiles: !filters.ignoreMacosFiles })}
+                  className={`relative w-12 h-7 rounded-full transition-colors duration-300 cursor-pointer ${
+                    filters.ignoreMacosFiles ? 'bg-[#f5c542]' : 'bg-white/10'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
+                      filters.ignoreMacosFiles ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            </>
+          )}
           <div className="border-t border-white/5" />
           <div className="flex items-center justify-between">
             <div>

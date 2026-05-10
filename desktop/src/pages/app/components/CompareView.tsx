@@ -3,12 +3,13 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useResults } from '../../../results/ResultsContext';
 import { toUiGroup } from '../../../results/adapter';
 import { useDelete } from '../../../results/useDelete';
+import DeleteProgressModal from './DeleteProgressModal';
 
 export default function CompareView() {
   const { groupId } = useParams();
   const navigate = useNavigate();
   const { latestScan, loaded } = useResults();
-  const { deleting, deleteFiles, lastFailures } = useDelete();
+  const { deleting, progress: deleteProgress, deleteFiles, lastFailures } = useDelete();
 
   const group = useMemo(() => {
     const raw = latestScan?.groups.find((g) => g.id === groupId);
@@ -89,6 +90,7 @@ export default function CompareView() {
 
   return (
     <div className="min-h-full flex flex-col pb-8">
+      <DeleteProgressModal progress={deleteProgress} />
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div>

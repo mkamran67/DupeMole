@@ -78,7 +78,28 @@ fn start_scan(
             }
         };
 
-        let result: ScanComplete = scanner::run_scan(path_bufs, &settings, &cancel, on_progress);
+        let on_checkpoint = {
+            let app = app_handle.clone();
+            let id = scan_id_thread.clone();
+            move |snapshot: &ScanComplete| {
+                if let Err(e) = results::save_last_scan(&app, snapshot) {
+                    eprintln!("save_last_scan (checkpoint) failed: {e}");
+                    return;
+                }
+                let _ = app.emit(
+                    "scan://checkpoint",
+                    serde_json::json!({
+                        "scanId": id,
+                        "groups": snapshot.groups.len(),
+                        "duplicateFiles": snapshot.duplicate_files,
+                        "wastedBytes": snapshot.wasted_bytes,
+                    }),
+                );
+            }
+        };
+
+        let result: ScanComplete =
+            scanner::run_scan(path_bufs, &settings, &cancel, on_progress, on_checkpoint);
 
         let was_cancelled = cancel.0.load(std::sync::atomic::Ordering::SeqCst);
 

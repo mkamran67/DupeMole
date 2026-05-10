@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::scanner::CancelToken;
+use crate::scanner::{is_macos_metadata_dir, is_macos_metadata_file, CancelToken};
 
 #[derive(Default)]
 pub struct ActiveOrganizes(pub Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>);
@@ -210,6 +210,8 @@ pub fn start_organize(
     op: OrganizeOp,
     granularity: Granularity,
     extensions: Option<Vec<String>>,
+    min_size: Option<u64>,
+    ignore_macos_files: Option<bool>,
     app: AppHandle,
     organizes: State<ActiveOrganizes>,
 ) -> Result<String, String> {
@@ -235,6 +237,8 @@ pub fn start_organize(
     let app_handle = app.clone();
     let id_thread = organize_id.clone();
     let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+    let ignore_macos = ignore_macos_files.unwrap_or(false);
+    let min_size_bytes = min_size.unwrap_or(0);
 
     std::thread::spawn(move || {
         let emit_progress = |p: OrganizeProgress| {
@@ -257,7 +261,20 @@ pub fn start_organize(
         const EMIT_EVERY_FILES: usize = 256;
         const EMIT_EVERY_MS: u128 = 120;
         'outer: for root in &source_paths {
-            for entry in WalkDir::new(root).follow_links(false) {
+            let walker = WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    if !ignore_macos {
+                        return true;
+                    }
+                    if !e.file_type().is_dir() {
+                        return true;
+                    }
+                    let name = e.file_name().to_str().unwrap_or("");
+                    !is_macos_metadata_dir(name)
+                });
+            for entry in walker {
                 if cancel.0.load(Ordering::SeqCst) {
                     break 'outer;
                 }
@@ -268,6 +285,19 @@ pub fn start_organize(
                 let path = entry.into_path();
                 if !extension_allowed(&path, &extensions) {
                     continue;
+                }
+                if ignore_macos {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if is_macos_metadata_file(name) {
+                            continue;
+                        }
+                    }
+                }
+                if min_size_bytes > 0 {
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    if size < min_size_bytes {
+                        continue;
+                    }
                 }
                 files.push(path.clone());
                 let now = std::time::Instant::now();

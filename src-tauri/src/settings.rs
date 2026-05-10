@@ -29,6 +29,7 @@ pub struct Filters {
     pub modified_after_ms: Option<u64>,
     pub modified_before_ms: Option<u64>,
     pub include_subdirs: bool,
+    pub ignore_macos_files: bool,
 }
 
 impl Default for Filters {
@@ -42,6 +43,7 @@ impl Default for Filters {
             modified_after_ms: None,
             modified_before_ms: None,
             include_subdirs: true,
+            ignore_macos_files: false,
         }
     }
 }
@@ -151,6 +153,7 @@ mod tests {
         assert!(f.min_size.is_none());
         assert!(f.max_size.is_none());
         assert!(f.include_subdirs);
+        assert!(!f.ignore_macos_files);
     }
 
     #[test]

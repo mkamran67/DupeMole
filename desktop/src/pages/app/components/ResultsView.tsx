@@ -7,6 +7,7 @@ import { type BucketType, type UiGroup, type UiFile } from '../../../results/ada
 import { useDelete } from '../../../results/useDelete';
 import { dirname, formatBytes } from '../../../lib/format';
 import PairRow from './PairRow';
+import DeleteProgressModal from './DeleteProgressModal';
 
 interface ResultsViewProps {
   onNavigateToScan?: () => void;
@@ -78,7 +79,7 @@ function VirtualPairList({
 
 export default function ResultsView({ onNavigateToScan }: ResultsViewProps) {
   const { latestScan, loaded, uiGroups, uiGroupsReady } = useResults();
-  const { deleting, deleteFiles, lastFailures, clearFailures } = useDelete();
+  const { deleting, progress: deleteProgress, deleteFiles, lastFailures, clearFailures } = useDelete();
   const navigate = useNavigate();
 
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
@@ -317,6 +318,7 @@ export default function ResultsView({ onNavigateToScan }: ResultsViewProps) {
 
   return (
     <div className="h-full flex flex-col">
+      <DeleteProgressModal progress={deleteProgress} />
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-white text-2xl font-bold tracking-tight">Results</h2>

@@ -170,6 +170,8 @@ export default function OrganizeView() {
         op,
         granularity: { year, month, day },
         extensions,
+        minSize: settings.filters.minSize,
+        ignoreMacosFiles: settings.filters.ignoreMacosFiles,
       });
     } catch (err) {
       console.error('start_organize failed', err);
@@ -177,7 +179,7 @@ export default function OrganizeView() {
       setRunning(false);
       setPhase(null);
     }
-  }, [sources, target, op, year, month, day, activeTypeIds]);
+  }, [sources, target, op, year, month, day, activeTypeIds, settings.filters.minSize, settings.filters.ignoreMacosFiles]);
 
   const cancel = useCallback(async () => {
     if (!activeId.current) return;

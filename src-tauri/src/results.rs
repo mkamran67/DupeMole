@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::scanner::ScanComplete;
 use crate::stats::{self, StatsState};
@@ -52,6 +52,17 @@ pub struct DeleteResult {
     pub freed_bytes: u64,
 }
 
+fn emit_delete_progress(app: &AppHandle, processed: u64, total: u64, current: Option<&str>) {
+    let _ = app.emit(
+        "delete://progress",
+        serde_json::json!({
+            "processed": processed,
+            "total": total,
+            "currentPath": current,
+        }),
+    );
+}
+
 #[tauri::command]
 pub fn delete_files(
     paths: Vec<String>,
@@ -59,24 +70,76 @@ pub fn delete_files(
     app: AppHandle,
     stats_state: State<StatsState>,
 ) -> DeleteResult {
-    let mut deleted = Vec::new();
-    let mut failed = Vec::new();
+    let total = paths.len() as u64;
+    // Capture sizes up-front: after deletion we can't stat the file anymore.
+    let sizes: Vec<u64> = paths
+        .iter()
+        .map(|p| fs::metadata(Path::new(p)).map(|m| m.len()).unwrap_or(0))
+        .collect();
+
+    emit_delete_progress(&app, 0, total, None);
+
+    let mut deleted: Vec<String> = Vec::new();
+    let mut failed: Vec<DeleteFailure> = Vec::new();
     let mut freed_bytes: u64 = 0;
-    for path in paths {
-        let p = Path::new(&path);
-        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        let result: Result<(), String> = if permanent {
-            fs::remove_file(p).map_err(|e| e.to_string())
-        } else {
-            trash::delete(p).map_err(|e| e.to_string())
-        };
-        match result {
-            Ok(()) => {
-                freed_bytes = freed_bytes.saturating_add(size);
-                deleted.push(path);
+
+    if permanent {
+        // Per-file: emit progress every ~32 files to keep UI snappy.
+        const EMIT_EVERY: u64 = 32;
+        for (i, path) in paths.iter().enumerate() {
+            let p = Path::new(path);
+            match fs::remove_file(p) {
+                Ok(()) => {
+                    freed_bytes = freed_bytes.saturating_add(sizes[i]);
+                    deleted.push(path.clone());
+                }
+                Err(error) => failed.push(DeleteFailure {
+                    path: path.clone(),
+                    error: error.to_string(),
+                }),
             }
-            Err(error) => failed.push(DeleteFailure { path, error }),
+            let processed = (i as u64) + 1;
+            if processed % EMIT_EVERY == 0 || processed == total {
+                emit_delete_progress(&app, processed, total, Some(path));
+            }
         }
+    } else {
+        // Batch trash. On macOS the default trash method spawns one osascript
+        // Finder-delete call per `trash::delete()` invocation — that's the
+        // per-file sound and the slowness the user reported. `delete_all`
+        // builds a single AppleScript with every path, so it's one Finder
+        // call, one sound, and orders of magnitude faster on large batches.
+        match trash::delete_all(paths.iter().map(Path::new)) {
+            Ok(()) => {
+                deleted = paths.clone();
+                freed_bytes = sizes.iter().sum();
+            }
+            Err(e) => {
+                // Batch failed atomically; the crate doesn't tell us which
+                // path tripped it. Fall back to per-file so the user can see
+                // exactly which deletes failed.
+                eprintln!("trash::delete_all failed ({e}); falling back to per-file");
+                const EMIT_EVERY: u64 = 32;
+                for (i, path) in paths.iter().enumerate() {
+                    let p = Path::new(path);
+                    match trash::delete(p) {
+                        Ok(()) => {
+                            freed_bytes = freed_bytes.saturating_add(sizes[i]);
+                            deleted.push(path.clone());
+                        }
+                        Err(err) => failed.push(DeleteFailure {
+                            path: path.clone(),
+                            error: err.to_string(),
+                        }),
+                    }
+                    let processed = (i as u64) + 1;
+                    if processed % EMIT_EVERY == 0 || processed == total {
+                        emit_delete_progress(&app, processed, total, Some(path));
+                    }
+                }
+            }
+        }
+        emit_delete_progress(&app, total, total, None);
     }
 
     if !deleted.is_empty() {

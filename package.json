@@ -5,6 +5,7 @@
   "scripts": {
     "tauri": "cargo tauri",
     "dev": "cargo tauri dev",
-    "build": "cargo tauri build"
+    "build": "cargo tauri build",
+    "release": "node release.mjs"
   }
 }
