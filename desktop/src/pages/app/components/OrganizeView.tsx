@@ -9,11 +9,7 @@ import {
   deriveActiveTypeIds,
 } from '../../../settings/filterPresets';
 import { basename } from '../../../lib/format';
-
-const MONTH_NAMES = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
+import FilterPanel from './FilterPanel';
 
 interface SourceDir {
   id: number;
@@ -46,16 +42,8 @@ interface OrganizeCompleteEvent {
   };
 }
 
-function buildPreview(
-  year: boolean,
-  month: boolean,
-  day: boolean,
-  separateMedia: boolean,
-  unknownBucket: boolean,
-): string {
-  const parts: string[] = [];
-  if (separateMedia) parts.push('Photos');
-  if (unknownBucket) parts.push('Unknown');
+function buildPreview(year: boolean, month: boolean, day: boolean): string {
+  const parts: string[] = ['Images'];
   if (year) {
     parts.push('2024');
     if (month) {
@@ -70,8 +58,8 @@ function buildPreview(
 export default function OrganizeView() {
   const { settings } = useSettings();
   const initialTypeIds = useMemo(
-    () => deriveActiveTypeIds(settings.filters.extensions),
-    [settings.filters.extensions]
+    () => deriveActiveTypeIds(settings.organizeFilters.extensions),
+    [settings.organizeFilters.extensions]
   );
 
   const [sources, setSources] = useState<SourceDir[]>([]);
@@ -80,8 +68,7 @@ export default function OrganizeView() {
   const [year, setYear] = useState(true);
   const [month, setMonth] = useState(true);
   const [day, setDay] = useState(false);
-  const [separateMedia, setSeparateMedia] = useState(false);
-  const [unknownBucket, setUnknownBucket] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const [activeTypeIds, setActiveTypeIds] = useState<string[]>(
     initialTypeIds.length > 0 ? initialTypeIds : ['images', 'videos']
   );
@@ -178,10 +165,10 @@ export default function OrganizeView() {
         sources: sources.map((s) => s.path),
         target,
         op,
-        granularity: { year, month, day, separateMedia, unknownBucket },
+        granularity: { year, month, day },
         extensions,
-        minSize: settings.filters.minSize,
-        ignoreMacosFiles: settings.filters.ignoreMacosFiles,
+        minSize: settings.organizeFilters.minSize,
+        ignoreMacosFiles: settings.organizeFilters.ignoreMacosFiles,
       });
     } catch (err) {
       console.error('start_organize failed', err);
@@ -189,7 +176,7 @@ export default function OrganizeView() {
       setRunning(false);
       setPhase(null);
     }
-  }, [sources, target, op, year, month, day, separateMedia, unknownBucket, activeTypeIds, settings.filters.minSize, settings.filters.ignoreMacosFiles]);
+  }, [sources, target, op, year, month, day, activeTypeIds, settings.organizeFilters.minSize, settings.organizeFilters.ignoreMacosFiles]);
 
   const cancel = useCallback(async () => {
     if (!activeId.current) return;
@@ -406,20 +393,6 @@ export default function OrganizeView() {
             { id: 'year', label: 'Year', checked: year, set: setYear, disabled: false },
             { id: 'month', label: 'Month', checked: month, set: setMonth, disabled: !year },
             { id: 'day', label: 'Day', checked: day, set: setDay, disabled: !month },
-            {
-              id: 'separateMedia',
-              label: 'Separate Photos & Videos',
-              checked: separateMedia,
-              set: setSeparateMedia,
-              disabled: false,
-            },
-            {
-              id: 'unknownBucket',
-              label: 'Unknown folder for undated files',
-              checked: unknownBucket,
-              set: setUnknownBucket,
-              disabled: false,
-            },
           ].map((c) => (
             <button
               key={c.id}
@@ -436,15 +409,28 @@ export default function OrganizeView() {
             </button>
           ))}
         </div>
-        <div className="rounded-xl bg-[#2c1810] border border-white/5 p-3">
+        <div className="rounded-xl bg-[#2c1810] border border-white/5 p-3 space-y-1">
           <p className="text-white/30 text-[10px] font-semibold uppercase tracking-wider mb-1">
             Preview
           </p>
           <p className="text-[#f5c542] text-sm font-mono truncate">
             {target ? `${basename(target)} / ` : ''}
-            {buildPreview(year, month, day, separateMedia, unknownBucket)}
+            {buildPreview(year, month, day)}
+          </p>
+          <p className="text-white/40 text-[11px] font-mono truncate">
+            {target ? `${basename(target)} / ` : ''}PDFs / report.pdf
+          </p>
+          <p className="text-white/40 text-[11px] font-mono truncate">
+            {target ? `${basename(target)} / ` : ''}Unknown / LOG / app.log
           </p>
         </div>
+        <p className="text-white/30 text-[11px] mt-3 leading-relaxed">
+          Files are grouped by type (Images, Videos, PDFs, Audio, Docs, Archives). Year/Month/Day
+          applies to Images & Videos with a readable date — undated media goes into{' '}
+          <code className="text-white/50">&lt;Category&gt;/Unknown</code>. Other types go directly
+          into their category folder. Files with extensions outside these groups go into{' '}
+          <code className="text-white/50">Unknown/&lt;EXT&gt;</code>.
+        </p>
       </div>
 
       {/* File types */}
@@ -480,9 +466,23 @@ export default function OrganizeView() {
         <p className="text-white/30 text-[11px] mt-3 leading-relaxed">
           Files with no readable capture date fall back to a date in the filename (e.g.{' '}
           <span className="font-mono">2025-02-11-0005.jpg</span>), then to the older of the
-          filesystem created/modified times. Enable <span className="text-white/60">Unknown
-          folder</span> to route those files into a dedicated bucket instead.
+          filesystem created/modified times. Undated images and videos are routed to{' '}
+          <code className="text-white/50">&lt;Category&gt;/Unknown</code>.
         </p>
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={() => setShowFilters((v) => !v)}
+            className="text-[#f5c542] hover:text-[#e0b038] text-xs font-medium cursor-pointer"
+          >
+            <i className={`${showFilters ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'} mr-1`}></i>
+            {showFilters ? 'Hide advanced filters' : 'Advanced filters'}
+          </button>
+        </div>
+        {showFilters && (
+          <div className="mt-4">
+            <FilterPanel kind="organize" />
+          </div>
+        )}
       </div>
 
       {/* Progress */}

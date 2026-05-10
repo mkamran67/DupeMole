@@ -11,6 +11,7 @@ import {
   deriveActiveTypeIds,
 } from '../../../settings/filterPresets';
 import { formatBytes, basename } from '../../../lib/format';
+import FilterPanel from './FilterPanel';
 
 interface ScanViewProps {
   onNavigateToResults?: () => void;
@@ -426,11 +427,12 @@ function ScanCompleteModal({
 }
 
 export default function ScanView({ onNavigateToResults }: ScanViewProps) {
-  const { settings, updateSettings, updateFilters } = useSettings();
+  const { settings, updateSettings, updateScanFilters } = useSettings();
+  const [showFilters, setShowFilters] = useState(false);
   const { setLatestScan } = useResults();
   const activeTypeIds = useMemo(
-    () => deriveActiveTypeIds(settings.filters.extensions),
-    [settings.filters.extensions]
+    () => deriveActiveTypeIds(settings.scanFilters.extensions),
+    [settings.scanFilters.extensions]
   );
 
   const [scanning, setScanning] = useState(false);
@@ -460,7 +462,7 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       ? activeTypeIds.filter((t) => t !== id)
       : [...activeTypeIds, id];
     const list = buildExtensionAllowlist(next, '');
-    updateFilters({ extensions: list });
+    updateScanFilters({ extensions: list });
   };
 
   const cancelScan = useCallback(async () => {
@@ -809,11 +811,20 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
         <div className="flex items-center justify-between mb-3">
           <p className="text-white/30 text-xs font-semibold uppercase tracking-wider">Quick Filters</p>
-          <p className="text-white/30 text-[11px]">
-            {settings.filters.extensions === null
-              ? 'All file types'
-              : `${activeTypeIds.length} of ${FILTER_TYPE_PRESETS.length} types`}
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="text-white/30 text-[11px]">
+              {settings.scanFilters.extensions === null
+                ? 'All file types'
+                : `${activeTypeIds.length} of ${FILTER_TYPE_PRESETS.length} types`}
+            </p>
+            <button
+              onClick={() => setShowFilters((v) => !v)}
+              className="text-[#f5c542] hover:text-[#e0b038] text-xs font-medium cursor-pointer"
+            >
+              <i className={`${showFilters ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'} mr-1`}></i>
+              {showFilters ? 'Hide advanced' : 'Advanced filters'}
+            </button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           {FILTER_TYPE_PRESETS.map((ft) => {
@@ -835,6 +846,11 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
             );
           })}
         </div>
+        {showFilters && (
+          <div className="mt-5">
+            <FilterPanel kind="scan" />
+          </div>
+        )}
       </div>
 
       {/* Scan options */}

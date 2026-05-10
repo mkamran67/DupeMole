@@ -9,7 +9,6 @@ const tabs = [
   { id: 'scan', icon: 'ri-search-line', label: 'Scan' },
   { id: 'results', icon: 'ri-folders-line', label: 'Results' },
   { id: 'organize', icon: 'ri-calendar-2-line', label: 'Organize' },
-  { id: 'filters', icon: 'ri-filter-3-line', label: 'Filters' },
   { id: 'settings', icon: 'ri-settings-3-line', label: 'Settings' },
 ];
 

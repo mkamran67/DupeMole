@@ -7,26 +7,49 @@ const IMAGE_EXTS: &[&str] = &[
     "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "arq", "srf", "sr2", "rw2", "orf", "raf",
     "pef", "3fr", "iiq", "mef", "x3f", "erf", "raw", "dcr", "kdc", "mrw", "rwl",
 ];
-const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "3gp", "3g2"];
+// Container formats parsed by `read_metadata_ms` (subset of categorized videos).
+const VIDEO_METADATA_EXTS: &[&str] = &["mp4", "m4v", "mov", "3gp", "3g2"];
+// Full video category — must mirror `videos` preset in filterPresets.ts.
+const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "flv", "wmv", "m4v"];
+const PDF_EXTS: &[&str] = &["pdf"];
+const AUDIO_EXTS: &[&str] = &["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff"];
+const DOC_EXTS: &[&str] = &["docx", "txt", "rtf", "odt", "doc", "xlsx", "pptx", "csv"];
+const ARCHIVE_EXTS: &[&str] = &["zip", "rar", "7z", "tar", "gz", "bz2", "xz"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaKind {
+pub enum FileCategory {
     Image,
     Video,
-    Other,
+    Pdf,
+    Audio,
+    Doc,
+    Archive,
+    Unknown,
 }
 
-pub fn media_kind(path: &Path) -> MediaKind {
+pub fn file_category(path: &Path) -> FileCategory {
     let Some(ext) = ext_lower(path) else {
-        return MediaKind::Other;
+        return FileCategory::Unknown;
     };
     if IMAGE_EXTS.iter().any(|e| *e == ext) {
-        return MediaKind::Image;
+        return FileCategory::Image;
     }
     if VIDEO_EXTS.iter().any(|e| *e == ext) {
-        return MediaKind::Video;
+        return FileCategory::Video;
     }
-    MediaKind::Other
+    if PDF_EXTS.iter().any(|e| *e == ext) {
+        return FileCategory::Pdf;
+    }
+    if AUDIO_EXTS.iter().any(|e| *e == ext) {
+        return FileCategory::Audio;
+    }
+    if DOC_EXTS.iter().any(|e| *e == ext) {
+        return FileCategory::Doc;
+    }
+    if ARCHIVE_EXTS.iter().any(|e| *e == ext) {
+        return FileCategory::Archive;
+    }
+    FileCategory::Unknown
 }
 
 fn ext_lower(path: &Path) -> Option<String> {
@@ -298,10 +321,33 @@ pub fn read_metadata_ms(path: &Path) -> Option<u64> {
     if IMAGE_EXTS.iter().any(|e| *e == ext) {
         return read_image_exif_ms(path);
     }
-    if VIDEO_EXTS.iter().any(|e| *e == ext) {
+    if VIDEO_METADATA_EXTS.iter().any(|e| *e == ext) {
         return read_mp4_creation_ms(path);
     }
     None
+}
+
+/// Format a category as the top-level folder name used by Organize. Mirrors
+/// the labels in `filterPresets.ts`.
+pub fn category_folder_name(c: FileCategory) -> &'static str {
+    match c {
+        FileCategory::Image => "Images",
+        FileCategory::Video => "Videos",
+        FileCategory::Pdf => "PDFs",
+        FileCategory::Audio => "Audio",
+        FileCategory::Doc => "Docs",
+        FileCategory::Archive => "Archives",
+        FileCategory::Unknown => "Unknown",
+    }
+}
+
+/// For an Unknown file, return the per-extension subfolder name (uppercase,
+/// no dot). Files with no extension are bucketed under "NoExtension".
+pub fn unknown_subfolder_name(path: &Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => ext.to_uppercase(),
+        _ => "NoExtension".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +493,52 @@ mod tests {
         let path = Path::new("/some/dir/2025-02-11-0005.jpg");
         let ms = read_filename_date_ms(path).unwrap();
         assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn file_category_classifies_known_extensions() {
+        assert_eq!(file_category(Path::new("/x/photo.jpg")), FileCategory::Image);
+        assert_eq!(file_category(Path::new("/x/photo.HEIC")), FileCategory::Image);
+        assert_eq!(file_category(Path::new("/x/clip.mp4")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.mkv")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.WEBM")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/doc.pdf")), FileCategory::Pdf);
+        assert_eq!(file_category(Path::new("/x/song.mp3")), FileCategory::Audio);
+        assert_eq!(file_category(Path::new("/x/song.FLAC")), FileCategory::Audio);
+        assert_eq!(file_category(Path::new("/x/file.docx")), FileCategory::Doc);
+        assert_eq!(file_category(Path::new("/x/file.csv")), FileCategory::Doc);
+        assert_eq!(file_category(Path::new("/x/file.zip")), FileCategory::Archive);
+        assert_eq!(file_category(Path::new("/x/file.7Z")), FileCategory::Archive);
+    }
+
+    #[test]
+    fn file_category_unknowns_and_no_extension() {
+        assert_eq!(file_category(Path::new("/x/app.log")), FileCategory::Unknown);
+        assert_eq!(file_category(Path::new("/x/something.weirdext")), FileCategory::Unknown);
+        assert_eq!(file_category(Path::new("/x/README")), FileCategory::Unknown);
+    }
+
+    #[test]
+    fn category_folder_name_uses_preset_labels() {
+        assert_eq!(category_folder_name(FileCategory::Image), "Images");
+        assert_eq!(category_folder_name(FileCategory::Video), "Videos");
+        assert_eq!(category_folder_name(FileCategory::Pdf), "PDFs");
+        assert_eq!(category_folder_name(FileCategory::Audio), "Audio");
+        assert_eq!(category_folder_name(FileCategory::Doc), "Docs");
+        assert_eq!(category_folder_name(FileCategory::Archive), "Archives");
+        assert_eq!(category_folder_name(FileCategory::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn unknown_subfolder_name_uppercases_extension() {
+        assert_eq!(unknown_subfolder_name(Path::new("/x/app.log")), "LOG");
+        assert_eq!(unknown_subfolder_name(Path::new("/x/data.TxT")), "TXT");
+    }
+
+    #[test]
+    fn unknown_subfolder_name_no_extension_uses_no_extension() {
+        assert_eq!(unknown_subfolder_name(Path::new("/x/README")), "NoExtension");
+        assert_eq!(unknown_subfolder_name(Path::new("/x/Makefile")), "NoExtension");
     }
 
     #[test]

@@ -51,7 +51,8 @@ export interface AppSettings {
   autoScan: boolean;
   minimizeTray: boolean;
   language: string;
-  filters: AppFilters;
+  scanFilters: AppFilters;
+  organizeFilters: AppFilters;
   useMetadataDates: boolean;
 }
 
@@ -64,7 +65,8 @@ const DEFAULTS: AppSettings = {
   autoScan: false,
   minimizeTray: true,
   language: 'English',
-  filters: DEFAULT_FILTERS,
+  scanFilters: DEFAULT_FILTERS,
+  organizeFilters: DEFAULT_FILTERS,
   useMetadataDates: false,
 };
 
@@ -72,7 +74,27 @@ interface SettingsContextValue {
   settings: AppSettings;
   loaded: boolean;
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
-  updateFilters: (patch: Partial<AppFilters>) => Promise<void>;
+  updateScanFilters: (patch: Partial<AppFilters>) => Promise<void>;
+  updateOrganizeFilters: (patch: Partial<AppFilters>) => Promise<void>;
+}
+
+/**
+ * Migrate a possibly-legacy settings payload (with a single `filters` field) into
+ * the new shape with separate `scanFilters` and `organizeFilters`. Exported for
+ * testing.
+ */
+export function migrateSettings(raw: Partial<AppSettings> & { filters?: Partial<AppFilters> }): AppSettings {
+  const legacy = raw.filters;
+  const scan = raw.scanFilters ?? legacy ?? DEFAULT_FILTERS;
+  const organize = raw.organizeFilters ?? legacy ?? DEFAULT_FILTERS;
+  const { filters: _drop, ...rest } = raw;
+  void _drop;
+  return {
+    ...DEFAULTS,
+    ...rest,
+    scanFilters: { ...DEFAULT_FILTERS, ...scan },
+    organizeFilters: { ...DEFAULT_FILTERS, ...organize },
+  } as AppSettings;
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -83,22 +105,24 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    invoke<AppSettings>('get_settings')
+    invoke<AppSettings & { filters?: AppFilters }>('get_settings')
       .then((s) => {
         if (cancelled) return;
-        const loadedFilters = s.filters ?? ({} as Partial<AppFilters>);
-        const firstRunOnMac =
-          isMacos() && !Object.prototype.hasOwnProperty.call(loadedFilters, 'ignoreMacosFiles');
-        const mergedFilters: AppFilters = {
-          ...DEFAULT_FILTERS,
-          ...loadedFilters,
-          ...(firstRunOnMac ? { ignoreMacosFiles: true } : {}),
-        };
-        const merged: AppSettings = { ...s, filters: mergedFilters };
-        setSettings(merged);
+        let migrated = migrateSettings(s);
+        const needsMacosDefault =
+          isMacos() &&
+          !Object.prototype.hasOwnProperty.call(s.scanFilters ?? s.filters ?? {}, 'ignoreMacosFiles');
+        if (needsMacosDefault) {
+          migrated = {
+            ...migrated,
+            scanFilters: { ...migrated.scanFilters, ignoreMacosFiles: true },
+            organizeFilters: { ...migrated.organizeFilters, ignoreMacosFiles: true },
+          };
+        }
+        setSettings(migrated);
         setLoaded(true);
-        if (firstRunOnMac) {
-          invoke('update_settings', { new: merged }).catch((err) =>
+        if (needsMacosDefault) {
+          invoke('update_settings', { new: migrated }).catch((err) =>
             console.error('failed to persist macOS-default filter', err)
           );
         }
@@ -121,11 +145,23 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [settings]
   );
 
-  const updateFilters = useCallback(
+  const updateScanFilters = useCallback(
     async (patch: Partial<AppFilters>) => {
       const merged: AppSettings = {
         ...settings,
-        filters: { ...settings.filters, ...patch },
+        scanFilters: { ...settings.scanFilters, ...patch },
+      };
+      await invoke('update_settings', { new: merged });
+      setSettings(merged);
+    },
+    [settings]
+  );
+
+  const updateOrganizeFilters = useCallback(
+    async (patch: Partial<AppFilters>) => {
+      const merged: AppSettings = {
+        ...settings,
+        organizeFilters: { ...settings.organizeFilters, ...patch },
       };
       await invoke('update_settings', { new: merged });
       setSettings(merged);
@@ -134,8 +170,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ settings, loaded, updateSettings, updateFilters }),
-    [settings, loaded, updateSettings, updateFilters]
+    () => ({ settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters }),
+    [settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters]
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

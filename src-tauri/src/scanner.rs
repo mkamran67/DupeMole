@@ -520,7 +520,7 @@ where
             folder_total,
             0,
             settings.ignore_hidden,
-            &settings.filters,
+            &settings.scan_filters,
             cancel,
             &mut extension_counts,
             &mut all_files,
@@ -812,7 +812,7 @@ mod tests {
         write_file(&log_b, b"same");
 
         let mut settings = Settings::default();
-        settings.filters.extensions = Some(vec!["txt".into()]);
+        settings.scan_filters.extensions = Some(vec!["txt".into()]);
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -898,7 +898,7 @@ mod tests {
         write_file(&dir.join("big2.bin"), &big);
 
         let mut settings = Settings::default();
-        settings.filters.min_size = Some(1024);
+        settings.scan_filters.min_size = Some(1024);
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -916,7 +916,7 @@ mod tests {
         write_file(&dir.join("big2.bin"), &vec![0u8; 4096]);
 
         let mut settings = Settings::default();
-        settings.filters.max_size = Some(100);
+        settings.scan_filters.max_size = Some(100);
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -933,7 +933,7 @@ mod tests {
         write_file(&dir.join("drop2.log"), b"same");
 
         let mut settings = Settings::default();
-        settings.filters.ignored_extensions = vec!["log".into()];
+        settings.scan_filters.ignored_extensions = vec!["log".into()];
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -948,7 +948,7 @@ mod tests {
         write_file(&dir.join("b.jpg"), b"img");
 
         let mut settings = Settings::default();
-        settings.filters.extensions = Some(vec!["jpg".into()]);
+        settings.scan_filters.extensions = Some(vec!["jpg".into()]);
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -995,7 +995,7 @@ mod tests {
         write_file(&sub.join("deep.txt"), b"same");
 
         let mut settings = Settings::default();
-        settings.filters.include_subdirs = false;
+        settings.scan_filters.include_subdirs = false;
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -1012,7 +1012,7 @@ mod tests {
         write_file(&node_modules.join("b.txt"), b"same");
 
         let mut settings = Settings::default();
-        settings.filters.ignored_folders = vec!["node_modules".into()];
+        settings.scan_filters.ignored_folders = vec!["node_modules".into()];
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -1063,7 +1063,7 @@ mod tests {
 
         let mut settings = Settings::default();
         // Far in the future — nothing should pass.
-        settings.filters.modified_after_ms = Some(u64::MAX / 2);
+        settings.scan_filters.modified_after_ms = Some(u64::MAX / 2);
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 
@@ -1189,7 +1189,7 @@ mod tests {
         write_file(&dir.join(".DS_Store"), b"finder metadata");
 
         let mut settings = Settings::default();
-        settings.filters.ignore_macos_files = true;
+        settings.scan_filters.ignore_macos_files = true;
         let cancel = CancelToken::new();
         let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
 

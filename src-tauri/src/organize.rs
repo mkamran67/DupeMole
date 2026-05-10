@@ -27,10 +27,6 @@ pub struct Granularity {
     pub year: bool,
     pub month: bool,
     pub day: bool,
-    #[serde(default)]
-    pub separate_media: bool,
-    #[serde(default)]
-    pub unknown_bucket: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,42 +137,42 @@ fn extension_allowed(path: &Path, allow: &Option<Vec<String>>) -> bool {
 fn build_subdir(
     target: &Path,
     ms: u64,
-    kind: crate::media_date::MediaKind,
+    category: crate::media_date::FileCategory,
     src: DateSource,
     g: &Granularity,
+    unknown_subfolder: &str,
 ) -> PathBuf {
-    use crate::media_date::MediaKind;
+    use crate::media_date::{category_folder_name, FileCategory};
     let mut out = target.to_path_buf();
+    out.push(category_folder_name(category));
 
-    // Photos/Videos split comes first when enabled.
-    if g.separate_media {
-        match kind {
-            MediaKind::Image => out.push("Photos"),
-            MediaKind::Video => out.push("Videos"),
-            MediaKind::Other => out.push("Other"),
+    match category {
+        FileCategory::Image | FileCategory::Video => {
+            // No reliable date → flat <Category>/Unknown/, no Y/M/D below.
+            if src == DateSource::Fallback {
+                out.push("Unknown");
+                return out;
+            }
+            if !g.year {
+                return out;
+            }
+            let (y, m, d) = unix_ms_to_civil(ms);
+            out.push(format!("{:04}", y));
+            if g.month {
+                let name = MONTH_NAMES[(m as usize - 1).min(11)];
+                out.push(format!("{:02}-{}", m, name));
+                if g.day {
+                    out.push(format!("{:02}", d));
+                }
+            }
+            out
+        }
+        FileCategory::Pdf | FileCategory::Audio | FileCategory::Doc | FileCategory::Archive => out,
+        FileCategory::Unknown => {
+            out.push(unknown_subfolder);
+            out
         }
     }
-
-    // Unknown nests inside the media folder when both toggles are on
-    // (→ Photos/Unknown/..., Videos/Unknown/...). When only unknown_bucket is
-    // on, it's a flat top-level Unknown/ bucket.
-    if g.unknown_bucket && src == DateSource::Fallback {
-        out.push("Unknown");
-    }
-
-    if !g.year {
-        return out;
-    }
-    let (y, m, d) = unix_ms_to_civil(ms);
-    out.push(format!("{:04}", y));
-    if g.month {
-        let name = MONTH_NAMES[(m as usize - 1).min(11)];
-        out.push(format!("{:02}-{}", m, name));
-        if g.day {
-            out.push(format!("{:02}", d));
-        }
-    }
-    out
 }
 
 /// Decide a non-conflicting destination path. If a file with the same name
@@ -396,8 +392,9 @@ pub fn start_organize(
                     return;
                 }
                 let (ms, date_src) = resolved_date(src);
-                let kind = crate::media_date::media_kind(src);
-                let dir = build_subdir(&target_path, ms, kind, date_src, &granularity);
+                let category = crate::media_date::file_category(src);
+                let unknown_sub = crate::media_date::unknown_subfolder_name(src);
+                let dir = build_subdir(&target_path, ms, category, date_src, &granularity, &unknown_sub);
                 if let Err(e) = std::fs::create_dir_all(&dir) {
                     errors.lock().unwrap().push(OrganizeError {
                         path: src.display().to_string(),
@@ -526,107 +523,107 @@ mod tests {
         assert_eq!((y, m, d), (2000, 2, 29));
     }
 
-    use crate::media_date::MediaKind;
+    use crate::media_date::FileCategory;
 
-    fn sub(target: &Path, ms: u64, g: &Granularity) -> PathBuf {
-        build_subdir(target, ms, MediaKind::Other, DateSource::Metadata, g)
+    fn sub_image(target: &Path, ms: u64, g: &Granularity) -> PathBuf {
+        build_subdir(target, ms, FileCategory::Image, DateSource::Metadata, g, "")
     }
 
     #[test]
-    fn build_subdir_respects_granularity() {
-        let target = PathBuf::from("/tmp/x");
-        let ms = 1_710_504_000_000; // 2024-03-15
-        let g = Granularity { year: true, month: true, day: true, ..Default::default() };
-        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March/15"));
-        let g = Granularity { year: true, month: true, day: false, ..Default::default() };
-        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/03-March"));
-        let g = Granularity { year: true, month: false, day: false, ..Default::default() };
-        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024"));
-        let g = Granularity { year: false, month: false, day: false, ..Default::default() };
-        assert_eq!(sub(&target, ms, &g), target);
-    }
-
-    #[test]
-    fn build_subdir_separate_media_splits_photos_videos_other() {
+    fn build_subdir_image_full_date_hierarchy() {
         let target = PathBuf::from("/t");
         let ms = 1_710_504_000_000; // 2024-03-15
-        let g = Granularity {
-            year: true, month: true, day: true,
-            separate_media: true, unknown_bucket: false,
-        };
+        let g = Granularity { year: true, month: true, day: true };
+        assert_eq!(sub_image(&target, ms, &g), PathBuf::from("/t/Images/2024/03-March/15"));
+    }
+
+    #[test]
+    fn build_subdir_image_year_only() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity { year: true, month: false, day: false };
+        assert_eq!(sub_image(&target, ms, &g), PathBuf::from("/t/Images/2024"));
+    }
+
+    #[test]
+    fn build_subdir_image_no_date_toggles_only_category() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity { year: false, month: false, day: false };
+        assert_eq!(sub_image(&target, ms, &g), PathBuf::from("/t/Images"));
+    }
+
+    #[test]
+    fn build_subdir_image_fallback_routes_to_category_unknown() {
+        let target = PathBuf::from("/t");
+        let ms = 1_710_504_000_000;
+        let g = Granularity { year: true, month: true, day: true };
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
-            PathBuf::from("/t/Photos/2024/03-March/15"),
+            build_subdir(&target, ms, FileCategory::Image, DateSource::Fallback, &g, ""),
+            PathBuf::from("/t/Images/Unknown"),
         );
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Video, DateSource::Metadata, &g),
-            PathBuf::from("/t/Videos/2024/03-March/15"),
-        );
-        assert_eq!(
-            build_subdir(&target, ms, MediaKind::Other, DateSource::Metadata, &g),
-            PathBuf::from("/t/Other/2024/03-March/15"),
+            build_subdir(&target, ms, FileCategory::Video, DateSource::Fallback, &g, ""),
+            PathBuf::from("/t/Videos/Unknown"),
         );
     }
 
     #[test]
-    fn build_subdir_unknown_bucket_only_for_fallback_source() {
+    fn build_subdir_video_year_only() {
         let target = PathBuf::from("/t");
         let ms = 1_710_504_000_000;
-        let g = Granularity {
-            year: true, month: true, day: false,
-            separate_media: false, unknown_bucket: true,
-        };
-        // Date came from EXIF — no Unknown prefix.
+        let g = Granularity { year: true, month: false, day: false };
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
-            PathBuf::from("/t/2024/03-March"),
-        );
-        // Date came from filename — still not Unknown.
-        assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Filename, &g),
-            PathBuf::from("/t/2024/03-March"),
-        );
-        // Date came from filesystem fallback — Unknown applies.
-        assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
-            PathBuf::from("/t/Unknown/2024/03-March"),
+            build_subdir(&target, ms, FileCategory::Video, DateSource::Metadata, &g, ""),
+            PathBuf::from("/t/Videos/2024"),
         );
     }
 
     #[test]
-    fn build_subdir_unknown_nests_inside_media_split() {
+    fn build_subdir_pdf_is_flat_regardless_of_granularity_or_source() {
         let target = PathBuf::from("/t");
         let ms = 1_710_504_000_000;
-        let g = Granularity {
-            year: true, month: true, day: false,
-            separate_media: true, unknown_bucket: true,
-        };
+        let g_full = Granularity { year: true, month: true, day: true };
+        let g_none = Granularity { year: false, month: false, day: false };
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
-            PathBuf::from("/t/Photos/Unknown/2024/03-March"),
+            build_subdir(&target, ms, FileCategory::Pdf, DateSource::Metadata, &g_full, ""),
+            PathBuf::from("/t/PDFs"),
         );
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Video, DateSource::Fallback, &g),
-            PathBuf::from("/t/Videos/Unknown/2024/03-March"),
-        );
-        // Dated image still goes straight into Photos with no Unknown.
-        assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Metadata, &g),
-            PathBuf::from("/t/Photos/2024/03-March"),
+            build_subdir(&target, ms, FileCategory::Pdf, DateSource::Fallback, &g_none, ""),
+            PathBuf::from("/t/PDFs"),
         );
     }
 
     #[test]
-    fn build_subdir_unknown_off_with_fallback_uses_regular_tree() {
+    fn build_subdir_audio_doc_archive_are_flat() {
         let target = PathBuf::from("/t");
-        let ms = 1_710_504_000_000;
-        let g = Granularity {
-            year: true, month: true, day: false,
-            separate_media: false, unknown_bucket: false,
-        };
+        let g = Granularity { year: true, month: true, day: true };
         assert_eq!(
-            build_subdir(&target, ms, MediaKind::Image, DateSource::Fallback, &g),
-            PathBuf::from("/t/2024/03-March"),
+            build_subdir(&target, 0, FileCategory::Audio, DateSource::Metadata, &g, ""),
+            PathBuf::from("/t/Audio"),
+        );
+        assert_eq!(
+            build_subdir(&target, 0, FileCategory::Doc, DateSource::Metadata, &g, ""),
+            PathBuf::from("/t/Docs"),
+        );
+        assert_eq!(
+            build_subdir(&target, 0, FileCategory::Archive, DateSource::Metadata, &g, ""),
+            PathBuf::from("/t/Archives"),
+        );
+    }
+
+    #[test]
+    fn build_subdir_unknown_uses_subfolder_name() {
+        let target = PathBuf::from("/t");
+        let g = Granularity { year: true, month: true, day: true };
+        assert_eq!(
+            build_subdir(&target, 0, FileCategory::Unknown, DateSource::Fallback, &g, "LOG"),
+            PathBuf::from("/t/Unknown/LOG"),
+        );
+        assert_eq!(
+            build_subdir(&target, 0, FileCategory::Unknown, DateSource::Metadata, &g, "NoExtension"),
+            PathBuf::from("/t/Unknown/NoExtension"),
         );
     }
 
@@ -666,17 +663,16 @@ mod tests {
     #[test]
     fn build_subdir_uses_month_name_format() {
         let target = PathBuf::from("/tmp/x");
-        // 2024-01-15
-        let ms = 1_705_276_800_000;
-        let g = Granularity { year: true, month: true, day: false, ..Default::default() };
-        assert_eq!(sub(&target, ms, &g), PathBuf::from("/tmp/x/2024/01-January"));
+        let ms = 1_705_276_800_000; // 2024-01-15
+        let g = Granularity { year: true, month: true, day: false };
+        assert_eq!(sub_image(&target, ms, &g), PathBuf::from("/tmp/x/Images/2024/01-January"));
     }
 
     #[test]
     fn build_subdir_zero_ms_is_epoch() {
         let target = PathBuf::from("/t");
-        let g = Granularity { year: true, month: true, day: true, ..Default::default() };
-        assert_eq!(sub(&target, 0, &g), PathBuf::from("/t/1970/01-January/01"));
+        let g = Granularity { year: true, month: true, day: true };
+        assert_eq!(sub_image(&target, 0, &g), PathBuf::from("/t/Images/1970/01-January/01"));
     }
 
     #[test]

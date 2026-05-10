@@ -59,7 +59,8 @@ pub struct Settings {
     pub auto_scan: bool,
     pub minimize_tray: bool,
     pub language: String,
-    pub filters: Filters,
+    pub scan_filters: Filters,
+    pub organize_filters: Filters,
     /// When true, scanner reads EXIF/container metadata for images and videos
     /// to determine the "original" capture date instead of filesystem mtime.
     /// Slower but more accurate when files have been copied/moved.
@@ -77,7 +78,8 @@ impl Default for Settings {
             auto_scan: false,
             minimize_tray: true,
             language: "English".to_string(),
-            filters: Filters::default(),
+            scan_filters: Filters::default(),
+            organize_filters: Filters::default(),
             use_metadata_dates: false,
         }
     }
@@ -99,7 +101,28 @@ pub fn load(app: &AppHandle) -> Settings {
     let Ok(bytes) = fs::read(&path) else {
         return Settings::default();
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    parse_settings(&bytes).unwrap_or_default()
+}
+
+/// Parse settings JSON, migrating the legacy single `filters` field into both
+/// `scanFilters` and `organizeFilters` when the new fields are absent.
+fn parse_settings(bytes: &[u8]) -> Option<Settings> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if let Some(obj) = value.as_object_mut() {
+        let has_scan = obj.contains_key("scanFilters");
+        let has_org = obj.contains_key("organizeFilters");
+        if !has_scan || !has_org {
+            if let Some(legacy) = obj.get("filters").cloned() {
+                if !has_scan {
+                    obj.insert("scanFilters".into(), legacy.clone());
+                }
+                if !has_org {
+                    obj.insert("organizeFilters".into(), legacy);
+                }
+            }
+        }
+    }
+    serde_json::from_value(value).ok()
 }
 
 pub fn save(app: &AppHandle, s: &Settings) -> Result<(), String> {
@@ -200,5 +223,53 @@ mod tests {
         let back: Filters = serde_json::from_str(&json).unwrap();
         assert_eq!(back.min_size, Some(1024));
         assert_eq!(back.modified_after_ms, Some(123_456_789));
+    }
+
+    #[test]
+    fn legacy_filters_field_migrates_into_both_new_fields() {
+        let json = br#"{
+            "filters": { "minSize": 4096, "ignoredFolders": ["node_modules"] }
+        }"#;
+        let s = parse_settings(json).unwrap();
+        assert_eq!(s.scan_filters.min_size, Some(4096));
+        assert_eq!(s.scan_filters.ignored_folders, vec!["node_modules".to_string()]);
+        assert_eq!(s.organize_filters.min_size, Some(4096));
+        assert_eq!(s.organize_filters.ignored_folders, vec!["node_modules".to_string()]);
+    }
+
+    #[test]
+    fn explicit_new_fields_take_precedence_over_legacy() {
+        let json = br#"{
+            "filters":         { "minSize": 1 },
+            "scanFilters":     { "minSize": 2 },
+            "organizeFilters": { "minSize": 3 }
+        }"#;
+        let s = parse_settings(json).unwrap();
+        assert_eq!(s.scan_filters.min_size, Some(2));
+        assert_eq!(s.organize_filters.min_size, Some(3));
+    }
+
+    #[test]
+    fn legacy_only_one_new_field_present_migrates_other() {
+        let json = br#"{
+            "filters":     { "minSize": 1 },
+            "scanFilters": { "minSize": 9 }
+        }"#;
+        let s = parse_settings(json).unwrap();
+        assert_eq!(s.scan_filters.min_size, Some(9));
+        assert_eq!(s.organize_filters.min_size, Some(1));
+    }
+
+    #[test]
+    fn settings_round_trip_keeps_filters_independent() {
+        let mut s = Settings::default();
+        s.scan_filters.min_size = Some(100);
+        s.organize_filters.min_size = Some(200);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("scanFilters"));
+        assert!(json.contains("organizeFilters"));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scan_filters.min_size, Some(100));
+        assert_eq!(back.organize_filters.min_size, Some(200));
     }
 }

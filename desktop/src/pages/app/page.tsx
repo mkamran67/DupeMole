@@ -4,7 +4,6 @@ import Sidebar from './components/Sidebar';
 import ScanView from './components/ScanView';
 import ResultsView from './components/ResultsView';
 import OrganizeView from './components/OrganizeView';
-import FiltersView from './components/FiltersView';
 import SettingsView from './components/SettingsView';
 import CompareView from './components/CompareView';
 import AboutView from './components/AboutView';
@@ -32,7 +31,6 @@ export default function AppPage() {
     { id: 'scan', node: <ScanView onNavigateToResults={handleNavigateToResults} /> },
     { id: 'results', node: <ResultsView onNavigateToScan={handleNavigateToScan} /> },
     { id: 'organize', node: <OrganizeView /> },
-    { id: 'filters', node: <FiltersView /> },
     { id: 'settings', node: <SettingsView /> },
     { id: 'about', node: <AboutView /> },
   ];
