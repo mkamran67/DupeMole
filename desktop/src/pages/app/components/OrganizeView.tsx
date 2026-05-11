@@ -4,12 +4,14 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useSettings } from '../../../settings/SettingsContext';
 import {
-  FILTER_TYPE_PRESETS,
   buildExtensionAllowlist,
   deriveActiveTypeIds,
+  mergePresets,
 } from '../../../settings/filterPresets';
 import { basename } from '../../../lib/format';
 import FilterPanel from './FilterPanel';
+import CollisionPromptModal, { type CollisionEvent } from './CollisionPromptModal';
+import CustomFileTypeModal from './CustomFileTypeModal';
 
 interface SourceDir {
   id: number;
@@ -35,7 +37,10 @@ interface OrganizeCompleteEvent {
     processed: number;
     copied: number;
     moved: number;
-    skipped: number;
+    skippedIdentical: number;
+    skippedByUser: number;
+    overwritten: number;
+    renamed: number;
     errors: { path: string; reason: string }[];
     cancelled: boolean;
     target: string;
@@ -56,10 +61,19 @@ function buildPreview(year: boolean, month: boolean, day: boolean): string {
 }
 
 export default function OrganizeView() {
-  const { settings } = useSettings();
-  const initialTypeIds = useMemo(
-    () => deriveActiveTypeIds(settings.organizeFilters.extensions),
-    [settings.organizeFilters.extensions]
+  const { settings, updateOrganizeFilters, updateSettings } = useSettings();
+
+  // Single source of truth: presets (built-in + user-defined custom) and the
+  // active type ids are derived from settings.organizeFilters.extensions.
+  // Toggling a chip writes back to settings so OrganizeView and the embedded
+  // FilterPanel stay in lockstep.
+  const allPresets = useMemo(
+    () => mergePresets(settings.customFileTypes),
+    [settings.customFileTypes]
+  );
+  const activeTypeIds = useMemo(
+    () => deriveActiveTypeIds(settings.organizeFilters.extensions, allPresets),
+    [settings.organizeFilters.extensions, allPresets]
   );
 
   const [sources, setSources] = useState<SourceDir[]>([]);
@@ -69,9 +83,7 @@ export default function OrganizeView() {
   const [month, setMonth] = useState(true);
   const [day, setDay] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
-  const [activeTypeIds, setActiveTypeIds] = useState<string[]>(
-    initialTypeIds.length > 0 ? initialTypeIds : ['images', 'videos']
-  );
+  const [customTypeModalOpen, setCustomTypeModalOpen] = useState(false);
 
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState<Phase | null>(null);
@@ -79,6 +91,7 @@ export default function OrganizeView() {
   const [total, setTotal] = useState(0);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [completion, setCompletion] = useState<OrganizeCompleteEvent['result'] | null>(null);
+  const [collision, setCollision] = useState<CollisionEvent | null>(null);
 
   const activeId = useRef<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -130,9 +143,28 @@ export default function OrganizeView() {
   };
 
   const toggleType = (id: string) => {
-    setActiveTypeIds((prev) =>
-      prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]
-    );
+    const next = activeTypeIds.includes(id)
+      ? activeTypeIds.filter((t) => t !== id)
+      : [...activeTypeIds, id];
+    updateOrganizeFilters({ extensions: buildExtensionAllowlist(next, '', allPresets) });
+  };
+
+  const addCustomFileType = async (label: string, formats: string[]) => {
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const next = [...settings.customFileTypes, { id, label, formats }];
+    await updateSettings({ customFileTypes: next });
+    // Auto-activate the new type so the user sees it take effect immediately.
+    const merged = mergePresets(next);
+    const nextActive = [...activeTypeIds, `custom:${id}`];
+    await updateOrganizeFilters({ extensions: buildExtensionAllowlist(nextActive, '', merged) });
+  };
+
+  const deleteCustomFileType = async (id: string) => {
+    const next = settings.customFileTypes.filter((c) => c.id !== id);
+    await updateSettings({ customFileTypes: next });
+    const merged = mergePresets(next);
+    const nextActive = activeTypeIds.filter((t) => t !== `custom:${id}`);
+    await updateOrganizeFilters({ extensions: buildExtensionAllowlist(nextActive, '', merged) });
   };
 
   const start = useCallback(async () => {
@@ -157,8 +189,6 @@ export default function OrganizeView() {
         : `org-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     activeId.current = id;
 
-    const extensions = buildExtensionAllowlist(activeTypeIds, '');
-
     try {
       await invoke<string>('start_organize', {
         organizeId: id,
@@ -166,7 +196,7 @@ export default function OrganizeView() {
         target,
         op,
         granularity: { year, month, day },
-        extensions,
+        extensions: settings.organizeFilters.extensions,
         minSize: settings.organizeFilters.minSize,
         ignoreMacosFiles: settings.organizeFilters.ignoreMacosFiles,
       });
@@ -176,7 +206,7 @@ export default function OrganizeView() {
       setRunning(false);
       setPhase(null);
     }
-  }, [sources, target, op, year, month, day, activeTypeIds, settings.organizeFilters.minSize, settings.organizeFilters.ignoreMacosFiles]);
+  }, [sources, target, op, year, month, day, settings.organizeFilters.extensions, settings.organizeFilters.minSize, settings.organizeFilters.ignoreMacosFiles]);
 
   const cancel = useCallback(async () => {
     if (!activeId.current) return;
@@ -190,6 +220,7 @@ export default function OrganizeView() {
   useEffect(() => {
     let unlistenProgress: UnlistenFn | undefined;
     let unlistenComplete: UnlistenFn | undefined;
+    let unlistenCollision: UnlistenFn | undefined;
 
     listen<OrganizeProgressEvent>('organize://progress', (e) => {
       if (e.payload.organizeId !== activeId.current) return;
@@ -205,12 +236,19 @@ export default function OrganizeView() {
       setCompletion(e.payload.result);
       setRunning(false);
       setPhase(null);
+      setCollision(null);
       activeId.current = null;
     }).then((u) => (unlistenComplete = u));
+
+    listen<CollisionEvent>('organize://collision', (e) => {
+      if (e.payload.organizeId !== activeId.current) return;
+      setCollision(e.payload);
+    }).then((u) => (unlistenCollision = u));
 
     return () => {
       unlistenProgress?.();
       unlistenComplete?.();
+      unlistenCollision?.();
     };
   }, []);
 
@@ -223,7 +261,12 @@ export default function OrganizeView() {
     return 0;
   }, [phase, processed, total]);
 
-  const canStart = sources.length > 0 && target && activeTypeIds.length > 0 && !running;
+  // Allow start when extensions = null (all types) OR at least one extension is in the
+  // allowlist (covering both built-in chips and named custom types).
+  const hasAnyAllowedType =
+    settings.organizeFilters.extensions === null
+    || settings.organizeFilters.extensions.length > 0;
+  const canStart = sources.length > 0 && !!target && hasAnyAllowedType && !running;
 
   return (
     <div className="min-h-full flex flex-col relative pb-12 md:pb-16">
@@ -440,28 +483,66 @@ export default function OrganizeView() {
             File Types
           </p>
           <p className="text-white/30 text-[11px]">
-            {activeTypeIds.length} of {FILTER_TYPE_PRESETS.length} types
+            {activeTypeIds.length} of {allPresets.length} types
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {FILTER_TYPE_PRESETS.map((ft) => {
+          {allPresets.map((ft) => {
             const active = activeTypeIds.includes(ft.id);
+            const isCustom = ft.id.startsWith('custom:');
+            const customId = isCustom ? ft.id.slice('custom:'.length) : null;
             return (
-              <button
-                key={ft.id}
-                onClick={() => toggleType(ft.id)}
-                disabled={running}
-                className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed ${
-                  active
-                    ? 'border-[#f5c542] bg-[#f5c542]/15 text-[#f5c542]'
-                    : 'border-white/10 text-white/50 hover:border-white/20'
-                }`}
-              >
-                <i className={`${ft.icon} text-sm`}></i>
-                {ft.label}
-              </button>
+              <span key={ft.id} className="inline-flex items-stretch">
+                <button
+                  onClick={() => toggleType(ft.id)}
+                  disabled={running}
+                  className={`inline-flex items-center gap-1.5 text-xs font-medium pl-3 ${
+                    isCustom ? 'pr-2' : 'pr-3'
+                  } py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed ${
+                    active
+                      ? 'border-[#f5c542] bg-[#f5c542]/15 text-[#f5c542]'
+                      : 'border-white/10 text-white/50 hover:border-white/20'
+                  }`}
+                  title={isCustom ? `${ft.label} (${ft.formats.join(', ').toLowerCase()})` : ft.label}
+                >
+                  <i className={`${ft.icon} text-sm`}></i>
+                  {ft.label}
+                  {isCustom && customId && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Delete ${ft.label}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (running) return;
+                        void deleteCustomFileType(customId);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (running) return;
+                          void deleteCustomFileType(customId);
+                        }
+                      }}
+                      className="ml-1 -mr-0.5 w-4 h-4 inline-flex items-center justify-center rounded-full text-current opacity-50 hover:opacity-100 hover:text-[#c45c5c] cursor-pointer"
+                    >
+                      <i className="ri-close-line text-[10px]"></i>
+                    </span>
+                  )}
+                </button>
+              </span>
             );
           })}
+          <button
+            onClick={() => setCustomTypeModalOpen(true)}
+            disabled={running}
+            className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border border-dashed border-white/15 text-white/40 hover:text-white/70 hover:border-white/30 transition-all duration-200 cursor-pointer whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Create a custom file type with your own name and extensions"
+          >
+            <i className="ri-add-line text-sm"></i>
+            New file type
+          </button>
         </div>
         <p className="text-white/30 text-[11px] mt-3 leading-relaxed">
           Files with no readable capture date fall back to a date in the filename (e.g.{' '}
@@ -528,6 +609,22 @@ export default function OrganizeView() {
         />
       )}
 
+      {/* Collision prompt — blocks the worker until the user decides. */}
+      {collision && (
+        <CollisionPromptModal
+          event={collision}
+          onResolved={() => setCollision(null)}
+        />
+      )}
+
+      {/* New custom file type */}
+      {customTypeModalOpen && (
+        <CustomFileTypeModal
+          onClose={() => setCustomTypeModalOpen(false)}
+          onCreate={addCustomFileType}
+        />
+      )}
+
       {/* Spacer to keep layout stable on tall screens */}
       <div className="flex-1" />
     </div>
@@ -556,6 +653,7 @@ function CompletionModal({
 
   const moved = result.moved + result.copied; // user only sees one mode at a time
   const errorCount = result.errors.length;
+  const skippedTotal = result.skippedIdentical + result.skippedByUser;
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
@@ -591,12 +689,29 @@ function CompletionModal({
               <p className="text-white/40 text-xs mt-1">{op === 'copy' ? 'Copied' : 'Moved'}</p>
             </div>
             <div className="bg-[#2c1810] rounded-xl border border-white/10 p-4 text-center">
-              <p className="text-white text-2xl font-bold">{result.skipped.toLocaleString()}</p>
-              <p className="text-white/40 text-xs mt-1">Skipped (duplicates)</p>
+              <p className="text-white text-2xl font-bold">{skippedTotal.toLocaleString()}</p>
+              <p className="text-white/40 text-xs mt-1">
+                Skipped
+                {(result.skippedIdentical > 0 || result.skippedByUser > 0) && (
+                  <span className="block text-white/30 text-[10px] mt-0.5">
+                    {result.skippedIdentical} identical
+                    {result.skippedByUser > 0 ? ` · ${result.skippedByUser} by user` : ''}
+                  </span>
+                )}
+              </p>
             </div>
             <div className="bg-[#2c1810] rounded-xl border border-white/10 p-4 text-center">
               <p className="text-white text-2xl font-bold">{result.processed.toLocaleString()}</p>
-              <p className="text-white/40 text-xs mt-1">Processed</p>
+              <p className="text-white/40 text-xs mt-1">
+                Processed
+                {(result.overwritten > 0 || result.renamed > 0) && (
+                  <span className="block text-white/30 text-[10px] mt-0.5">
+                    {result.overwritten > 0 ? `${result.overwritten} overwritten` : ''}
+                    {result.overwritten > 0 && result.renamed > 0 ? ' · ' : ''}
+                    {result.renamed > 0 ? `${result.renamed} renamed` : ''}
+                  </span>
+                )}
+              </p>
             </div>
             <div className="bg-[#2c1810] rounded-xl border border-white/10 p-4 text-center">
               <p

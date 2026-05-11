@@ -113,10 +113,7 @@ function PairRowImpl({
   onReveal,
 }: PairRowProps) {
   return (
-    <div
-      className="flex items-center gap-2 px-2 py-2 rounded-lg border bg-[#3a2316] border-white/10"
-      style={{ contentVisibility: 'auto', containIntrinsicSize: '110px' } as React.CSSProperties}
-    >
+    <div className="flex items-center gap-2 px-2 py-2 rounded-lg border bg-[#3a2316] border-white/10">
       <FileSide
         file={original}
         partnerPath={duplicate.path}

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildExtensionAllowlist,
   deriveActiveTypeIds,
+  mergePresets,
   sizePresetLabel,
   datePresetLabel,
   datePresetToAfterMs,
@@ -77,6 +78,65 @@ describe('deriveActiveTypeIds', () => {
 
   it('returns empty array for an unrelated extension list', () => {
     expect(deriveActiveTypeIds(['xyz'])).toEqual([]);
+  });
+});
+
+describe('mergePresets', () => {
+  it('returns built-in presets when no customs are passed', () => {
+    expect(mergePresets([])).toEqual(FILTER_TYPE_PRESETS);
+  });
+
+  it('appends custom types with a "custom:" id prefix so they never clash', () => {
+    const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log', 'bak'] }]);
+    const custom = merged.find((p) => p.id === 'custom:logs');
+    expect(custom).toBeDefined();
+    expect(custom!.label).toBe('Logs');
+    expect(custom!.formats).toEqual(['log', 'bak']);
+    expect(custom!.icon).toBeTruthy();
+  });
+
+  it('preserves order: built-ins first, customs in declared order', () => {
+    const merged = mergePresets([
+      { id: 'a', label: 'A', formats: ['a'] },
+      { id: 'b', label: 'B', formats: ['b'] },
+    ]);
+    const builtInCount = FILTER_TYPE_PRESETS.length;
+    expect(merged[builtInCount].id).toBe('custom:a');
+    expect(merged[builtInCount + 1].id).toBe('custom:b');
+  });
+});
+
+describe('deriveActiveTypeIds with custom presets', () => {
+  it('recognizes a custom preset as active when all its formats are in the allowlist', () => {
+    const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log', 'bak'] }]);
+    const ids = deriveActiveTypeIds(['log', 'bak'], merged);
+    expect(ids).toContain('custom:logs');
+  });
+
+  it('does not flip on a custom preset when only some of its formats are present', () => {
+    const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log', 'bak'] }]);
+    expect(deriveActiveTypeIds(['log'], merged)).not.toContain('custom:logs');
+  });
+
+  it('skips zero-format presets (regression: an empty custom type must not auto-activate)', () => {
+    const merged = mergePresets([{ id: 'empty', label: 'Empty', formats: [] }]);
+    expect(deriveActiveTypeIds(['jpg'], merged)).not.toContain('custom:empty');
+  });
+});
+
+describe('buildExtensionAllowlist with custom presets', () => {
+  it('merges extensions from a custom preset when its id is active', () => {
+    const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log', 'bak'] }]);
+    const list = buildExtensionAllowlist(['custom:logs'], '', merged);
+    expect(list).toEqual(expect.arrayContaining(['log', 'bak']));
+  });
+
+  it('allows enabling ONLY a custom preset with no built-ins selected', () => {
+    // Pins the user-facing requirement: deselect all built-ins, use a
+    // custom preset, and still get a non-null allowlist.
+    const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log'] }]);
+    const list = buildExtensionAllowlist(['custom:logs'], '', merged);
+    expect(list).toEqual(['log']);
   });
 });
 

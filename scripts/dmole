@@ -1,0 +1,58 @@
+#!/usr/bin/env sh
+# dmole — launch DupeMole from the terminal, optionally preloading directories.
+#
+#   dmole              open the app
+#   dmole .            open the app and seed the scan with $PWD
+#   dmole ~/Pictures   open the app and seed the scan with ~/Pictures
+#   dmole a b c        seed multiple directories
+#
+# Install (Linux):
+#   cp scripts/dmole /usr/local/bin/dmole && chmod +x /usr/local/bin/dmole
+#
+# Install (macOS):
+#   cp scripts/dmole /usr/local/bin/dmole && chmod +x /usr/local/bin/dmole
+#
+# Resolution order for the actual binary:
+#   1. $DUPEMOLE_BIN
+#   2. `dupemole` on PATH
+#   3. /usr/bin/dupemole, /usr/local/bin/dupemole
+#   4. macOS: /Applications/DupeMole.app/Contents/MacOS/dupemole
+#
+# Relative paths are passed through as-is — the app canonicalizes them
+# against its own cwd, which matches the shell's cwd when invoked here.
+
+set -e
+
+find_bin() {
+    if [ -n "${DUPEMOLE_BIN:-}" ] && [ -x "$DUPEMOLE_BIN" ]; then
+        printf '%s\n' "$DUPEMOLE_BIN"
+        return 0
+    fi
+    if command -v dupemole >/dev/null 2>&1; then
+        command -v dupemole
+        return 0
+    fi
+    for candidate in \
+        /usr/bin/dupemole \
+        /usr/local/bin/dupemole \
+        /Applications/DupeMole.app/Contents/MacOS/dupemole \
+        "$HOME/Applications/DupeMole.app/Contents/MacOS/dupemole"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+bin=$(find_bin) || {
+    echo "dmole: cannot find the DupeMole binary." >&2
+    echo "       set DUPEMOLE_BIN, or install DupeMole so 'dupemole' is on PATH." >&2
+    exit 127
+}
+
+# On macOS, the binary inside a .app bundle expects its working directory to
+# be the user's shell cwd (so '.' resolves correctly). exec keeps the same
+# pid so terminal job control behaves as expected.
+exec "$bin" "$@"

@@ -1,11 +1,11 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { isMacos, useSettings, type AppFilters } from '../../../settings/SettingsContext';
 import {
-  FILTER_TYPE_PRESETS,
   SIZE_PRESETS,
   DATE_PRESETS,
   buildExtensionAllowlist,
   deriveActiveTypeIds,
+  mergePresets,
   sizePresetLabel,
   datePresetLabel,
   datePresetToAfterMs,
@@ -27,7 +27,16 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
     [kind, updateScanFilters, updateOrganizeFilters]
   );
 
-  const [filterTypes, setFilterTypes] = useState<FilterTypePreset[]>(FILTER_TYPE_PRESETS);
+  // Merge built-in presets with user-defined custom types so a custom chip
+  // shows up here too and toggling stays in sync with OrganizeView.
+  const mergedFromSettings = useMemo(
+    () => mergePresets(settings.customFileTypes),
+    [settings.customFileTypes]
+  );
+  const [filterTypes, setFilterTypes] = useState<FilterTypePreset[]>(mergedFromSettings);
+  useEffect(() => {
+    setFilterTypes(mergedFromSettings);
+  }, [mergedFromSettings]);
   const activeTypes = useMemo(
     () => deriveActiveTypeIds(filters.extensions, filterTypes),
     [filters.extensions, filterTypes]

@@ -128,6 +128,23 @@ export function deriveActiveTypeIds(
   if (!extensions) return presets.map((p) => p.id);
   const set = new Set(extensions.map((e) => e.toLowerCase()));
   return presets
-    .filter((p) => p.formats.every((f) => set.has(f.toLowerCase())))
+    .filter((p) => p.formats.length > 0 && p.formats.every((f) => set.has(f.toLowerCase())))
     .map((p) => p.id);
+}
+
+/**
+ * Merge built-in presets with user-defined custom file types. Custom types
+ * appear after built-ins, get the prefix id `custom:` (so they never clash
+ * with built-in ids), and use a generic icon.
+ */
+export function mergePresets(
+  customTypes: { id: string; label: string; formats: string[] }[],
+): FilterTypePreset[] {
+  const customPresets: FilterTypePreset[] = customTypes.map((c) => ({
+    id: `custom:${c.id}`,
+    label: c.label,
+    formats: c.formats,
+    icon: 'ri-price-tag-3-line',
+  }));
+  return [...FILTER_TYPE_PRESETS, ...customPresets];
 }

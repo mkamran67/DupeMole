@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,8 +12,149 @@ use walkdir::WalkDir;
 
 use crate::scanner::{is_macos_metadata_dir, is_macos_metadata_file, CancelToken};
 
+/// What to do when a real (non-identical) destination collision happens.
+/// `*All` variants stick for the remainder of the organize run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CollisionDecision {
+    Overwrite,
+    Skip,
+    KeepBoth,
+    OverwriteAll,
+    SkipAll,
+    KeepBothAll,
+    Cancel,
+}
+
+impl CollisionDecision {
+    fn is_apply_to_all(self) -> bool {
+        matches!(self, Self::OverwriteAll | Self::SkipAll | Self::KeepBothAll)
+    }
+}
+
+/// Per-organize shared state for resolving collisions via a modal prompt.
+/// Workers consult `apply_to_all` first; if unset, they serialize on
+/// `prompt_lock`, emit a `collision` event, and wait on `inner`/`cond` for
+/// the frontend to call `respond_to_collision`. While a prompt is open,
+/// `inner.paused` is set so other rayon workers stall at `wait_if_paused`
+/// instead of organizing files behind the user's back.
 #[derive(Default)]
-pub struct ActiveOrganizes(pub Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>);
+pub struct CollisionState {
+    prompt_lock: Mutex<()>,
+    inner: Mutex<PromptInner>,
+    cond: Condvar,
+    apply_to_all: Mutex<Option<CollisionDecision>>,
+}
+
+#[derive(Default)]
+struct PromptInner {
+    paused: bool,
+    pending: Option<CollisionDecision>,
+}
+
+impl CollisionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Block until a decision is available, emitting the prompt event only
+    /// when no sticky decision exists. Pauses all workers via the gate while
+    /// the prompt is open. Returns `None` if cancellation kicked in.
+    fn await_decision<F: FnOnce()>(
+        &self,
+        cancel: &CancelToken,
+        emit_event: F,
+    ) -> Option<CollisionDecision> {
+        if let Some(d) = *self.apply_to_all.lock().unwrap() {
+            return Some(d);
+        }
+        // Serialize prompts: only one collision modal in flight at a time.
+        let _guard = self.prompt_lock.lock().unwrap();
+        // Re-check under the lock — another worker may have set apply_to_all
+        // while we were queuing.
+        if let Some(d) = *self.apply_to_all.lock().unwrap() {
+            return Some(d);
+        }
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.paused = true;
+            inner.pending = None;
+        }
+        emit_event();
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            if cancel.0.load(Ordering::SeqCst) {
+                inner.paused = false;
+                self.cond.notify_all();
+                return None;
+            }
+            if let Some(d) = inner.pending {
+                inner.paused = false;
+                if d.is_apply_to_all() {
+                    *self.apply_to_all.lock().unwrap() = Some(d);
+                }
+                self.cond.notify_all();
+                return Some(d);
+            }
+            let (g, _) = self
+                .cond
+                .wait_timeout(inner, Duration::from_millis(100))
+                .unwrap();
+            inner = g;
+        }
+    }
+
+    /// Gate that other workers check before starting their next file. Blocks
+    /// while a prompt is open. Returns `false` if cancellation fires while
+    /// waiting (caller should bail out cleanly).
+    pub fn wait_if_paused(&self, cancel: &CancelToken) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        while inner.paused {
+            if cancel.0.load(Ordering::SeqCst) {
+                return false;
+            }
+            let (g, _) = self
+                .cond
+                .wait_timeout(inner, Duration::from_millis(100))
+                .unwrap();
+            inner = g;
+        }
+        true
+    }
+
+    /// Frontend response: store the decision and wake the waiting worker.
+    fn respond(&self, decision: CollisionDecision) {
+        self.inner.lock().unwrap().pending = Some(decision);
+        self.cond.notify_all();
+    }
+}
+
+/// Outcome of resolving a destination path for one source file.
+#[derive(Debug)]
+enum Resolution {
+    /// No collision; copy/move to this path normally.
+    Use(PathBuf),
+    /// Collision resolved by overwriting the existing file at this path.
+    Overwrite(PathBuf),
+    /// Collision resolved by keeping both under a numbered suffix.
+    Renamed(PathBuf),
+    /// Existing file is byte-identical; nothing to do.
+    SkipIdentical,
+    /// User chose Skip/Skip All for this collision.
+    SkippedByUser,
+    /// User cancelled, or cancellation was already in flight.
+    Cancelled,
+}
+
+/// One active organize: cancel signal + collision state, looked up by
+/// `organize_id` in `ActiveOrganizes`.
+pub struct OrganizeHandle {
+    pub cancel: Arc<AtomicBool>,
+    pub collision: Arc<CollisionState>,
+}
+
+#[derive(Default)]
+pub struct ActiveOrganizes(pub Mutex<HashMap<String, OrganizeHandle>>);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -58,7 +200,14 @@ pub struct OrganizeComplete {
     pub processed: u64,
     pub copied: u64,
     pub moved: u64,
-    pub skipped: u64,
+    /// Byte-identical destinations — silent skips (existing behavior).
+    pub skipped_identical: u64,
+    /// User chose Skip / Skip All in the collision prompt.
+    pub skipped_by_user: u64,
+    /// User chose Overwrite / Overwrite All.
+    pub overwritten: u64,
+    /// User chose Keep Both / Keep Both All — written to a numbered path.
+    pub renamed: u64,
     pub errors: Vec<OrganizeError>,
     pub cancelled: bool,
     pub target: String,
@@ -175,17 +324,10 @@ fn build_subdir(
     }
 }
 
-/// Decide a non-conflicting destination path. If a file with the same name
-/// already exists at `desired` and is byte-identical (same size + matching
-/// BLAKE3 head/tail), return Ok(None) to signal "skip". Otherwise return a
-/// unique path with " (1)", " (2)", … suffix.
-fn resolve_destination(source: &Path, desired: PathBuf) -> std::io::Result<Option<PathBuf>> {
-    if !desired.exists() {
-        return Ok(Some(desired));
-    }
-    if files_byte_identical(source, &desired)? {
-        return Ok(None);
-    }
+/// Find the next free numbered-suffix path for `desired`, treating any
+/// byte-identical existing candidate along the way as a skip. Used by the
+/// `KeepBoth` decision branch and as a building block for tests.
+fn next_keep_both_path(source: &Path, desired: &Path) -> std::io::Result<Resolution> {
     let stem = desired
         .file_stem()
         .and_then(|s| s.to_str())
@@ -200,13 +342,54 @@ fn resolve_destination(source: &Path, desired: PathBuf) -> std::io::Result<Optio
     for n in 1..u32::MAX {
         let candidate = parent.join(format!("{} ({}){}", stem, n, ext));
         if !candidate.exists() {
-            return Ok(Some(candidate));
+            return Ok(Resolution::Renamed(candidate));
         }
         if files_byte_identical(source, &candidate)? {
-            return Ok(None);
+            return Ok(Resolution::SkipIdentical);
         }
     }
-    Ok(Some(desired)) // unreachable in practice
+    Ok(Resolution::SkipIdentical) // unreachable in practice
+}
+
+/// Decide the destination outcome for one source file. Byte-identical
+/// collisions short-circuit to `SkipIdentical` with no prompt — there's
+/// nothing to do. Real collisions consult `CollisionState` for a user
+/// decision, possibly emitting a prompt event via `emit_event`.
+fn resolve_with_collision_state<F: FnOnce()>(
+    source: &Path,
+    desired: PathBuf,
+    state: &CollisionState,
+    cancel: &CancelToken,
+    emit_event: F,
+) -> std::io::Result<Resolution> {
+    if !desired.exists() {
+        return Ok(Resolution::Use(desired));
+    }
+    // Byte-identical collisions skip silently ONLY when the user hasn't
+    // already chosen an "apply to all" policy. Once a sticky decision exists,
+    // honor it for every collision — including identical ones — so the
+    // chosen behavior (Overwrite All / Skip All / Cancel / Keep Both All)
+    // applies uniformly to the rest of the run.
+    let sticky = *state.apply_to_all.lock().unwrap();
+    if sticky.is_none() && files_byte_identical(source, &desired)? {
+        return Ok(Resolution::SkipIdentical);
+    }
+    let Some(decision) = state.await_decision(cancel, emit_event) else {
+        return Ok(Resolution::Cancelled);
+    };
+    match decision {
+        CollisionDecision::Skip | CollisionDecision::SkipAll => Ok(Resolution::SkippedByUser),
+        CollisionDecision::Overwrite | CollisionDecision::OverwriteAll => {
+            Ok(Resolution::Overwrite(desired))
+        }
+        CollisionDecision::KeepBoth | CollisionDecision::KeepBothAll => {
+            next_keep_both_path(source, &desired)
+        }
+        CollisionDecision::Cancel => {
+            cancel.0.store(true, Ordering::SeqCst);
+            Ok(Resolution::Cancelled)
+        }
+    }
 }
 
 fn files_byte_identical(a: &Path, b: &Path) -> std::io::Result<bool> {
@@ -243,6 +426,37 @@ fn files_byte_identical(a: &Path, b: &Path) -> std::io::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// Outcome category used to drive counters in the par_iter body.
+enum ResolutionKind {
+    Normal,
+    Overwrite,
+    Renamed,
+}
+
+fn emit_organizing_progress(
+    app: &AppHandle,
+    id: &str,
+    processed: &AtomicU64,
+    total: u64,
+    src: &Path,
+) {
+    let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+    if done % 25 == 0 || done == total {
+        let _ = app.emit(
+            "organize://progress",
+            serde_json::json!({
+                "organizeId": id,
+                "progress": OrganizeProgress {
+                    processed: done,
+                    total,
+                    current_path: Some(src.to_path_buf()),
+                    phase: "organizing",
+                }
+            }),
+        );
+    }
 }
 
 fn move_file(source: &Path, dest: &Path) -> std::io::Result<()> {
@@ -283,14 +497,18 @@ pub fn start_organize(
 
     let organize_id = organize_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let cancel = CancelToken::new();
-    organizes
-        .0
-        .lock()
-        .unwrap()
-        .insert(organize_id.clone(), cancel.0.clone());
+    let collision_state = Arc::new(CollisionState::new());
+    organizes.0.lock().unwrap().insert(
+        organize_id.clone(),
+        OrganizeHandle {
+            cancel: cancel.0.clone(),
+            collision: collision_state.clone(),
+        },
+    );
 
     let app_handle = app.clone();
     let id_thread = organize_id.clone();
+    let collision_thread = collision_state.clone();
     let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
     let ignore_macos = ignore_macos_files.unwrap_or(false);
     let min_size_bytes = min_size.unwrap_or(0);
@@ -383,11 +601,22 @@ pub fn start_organize(
         let processed = AtomicU64::new(0);
         let copied = AtomicU64::new(0);
         let moved = AtomicU64::new(0);
-        let skipped = AtomicU64::new(0);
+        let skipped_identical = AtomicU64::new(0);
+        let skipped_by_user = AtomicU64::new(0);
+        let overwritten = AtomicU64::new(0);
+        let renamed = AtomicU64::new(0);
         let errors = Mutex::new(Vec::<OrganizeError>::new());
 
         if !cancelled_during_walk {
             files.par_iter().for_each(|src| {
+                if cancel.0.load(Ordering::SeqCst) {
+                    return;
+                }
+                // Stall here while any collision prompt is open — we don't
+                // want this worker organizing files behind the user's back.
+                if !collision_thread.wait_if_paused(&cancel) {
+                    return;
+                }
                 if cancel.0.load(Ordering::SeqCst) {
                     return;
                 }
@@ -407,35 +636,82 @@ pub fn start_organize(
                     None => return,
                 };
                 let desired = dir.join(&filename);
-                let dest = match resolve_destination(src, desired) {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        skipped.fetch_add(1, Ordering::Relaxed);
-                        let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                        if done % 25 == 0 || done == total {
-                            let _ = app_handle.emit(
-                                "organize://progress",
-                                serde_json::json!({
-                                    "organizeId": id_thread,
-                                    "progress": OrganizeProgress {
-                                        processed: done,
-                                        total,
-                                        current_path: Some(src.clone()),
-                                        phase: "organizing",
-                                    }
-                                }),
-                            );
+
+                let source_size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+                let existing_size = std::fs::metadata(&desired).map(|m| m.len()).unwrap_or(0);
+                let app_for_emit = app_handle.clone();
+                let id_for_emit = id_thread.clone();
+                let src_for_emit = src.clone();
+                let desired_for_emit = desired.clone();
+                let emit_collision = move || {
+                    let _ = app_for_emit.emit(
+                        "organize://collision",
+                        serde_json::json!({
+                            "organizeId": id_for_emit,
+                            "sourcePath": src_for_emit,
+                            "desiredPath": desired_for_emit,
+                            "sourceSize": source_size,
+                            "existingSize": existing_size,
+                        }),
+                    );
+                };
+
+                let resolution =
+                    match resolve_with_collision_state(src, desired, &collision_thread, &cancel, emit_collision) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            errors.lock().unwrap().push(OrganizeError {
+                                path: src.display().to_string(),
+                                reason: format!("resolve dest: {e}"),
+                            });
+                            return;
                         }
+                    };
+
+                let (dest_opt, kind) = match resolution {
+                    Resolution::Use(p) => (Some(p), ResolutionKind::Normal),
+                    Resolution::Overwrite(p) => (Some(p), ResolutionKind::Overwrite),
+                    Resolution::Renamed(p) => (Some(p), ResolutionKind::Renamed),
+                    Resolution::SkipIdentical => {
+                        skipped_identical.fetch_add(1, Ordering::Relaxed);
+                        emit_organizing_progress(
+                            &app_handle,
+                            &id_thread,
+                            &processed,
+                            total,
+                            src,
+                        );
                         return;
                     }
-                    Err(e) => {
+                    Resolution::SkippedByUser => {
+                        skipped_by_user.fetch_add(1, Ordering::Relaxed);
+                        emit_organizing_progress(
+                            &app_handle,
+                            &id_thread,
+                            &processed,
+                            total,
+                            src,
+                        );
+                        return;
+                    }
+                    Resolution::Cancelled => return,
+                };
+
+                let dest = match dest_opt {
+                    Some(p) => p,
+                    None => return,
+                };
+
+                // Overwrite path: rename() on Windows won't replace; remove first.
+                if matches!(kind, ResolutionKind::Overwrite) && dest.exists() {
+                    if let Err(e) = std::fs::remove_file(&dest) {
                         errors.lock().unwrap().push(OrganizeError {
                             path: src.display().to_string(),
-                            reason: format!("resolve dest: {e}"),
+                            reason: format!("remove existing: {e}"),
                         });
                         return;
                     }
-                };
+                }
 
                 let result = match op {
                     OrganizeOp::Copy => std::fs::copy(src, &dest).map(|_| ()),
@@ -443,13 +719,21 @@ pub fn start_organize(
                 };
 
                 match result {
-                    Ok(()) => match op {
-                        OrganizeOp::Copy => {
-                            copied.fetch_add(1, Ordering::Relaxed);
+                    Ok(()) => match kind {
+                        ResolutionKind::Overwrite => {
+                            overwritten.fetch_add(1, Ordering::Relaxed);
                         }
-                        OrganizeOp::Move => {
-                            moved.fetch_add(1, Ordering::Relaxed);
+                        ResolutionKind::Renamed => {
+                            renamed.fetch_add(1, Ordering::Relaxed);
                         }
+                        ResolutionKind::Normal => match op {
+                            OrganizeOp::Copy => {
+                                copied.fetch_add(1, Ordering::Relaxed);
+                            }
+                            OrganizeOp::Move => {
+                                moved.fetch_add(1, Ordering::Relaxed);
+                            }
+                        },
                     },
                     Err(e) => errors.lock().unwrap().push(OrganizeError {
                         path: src.display().to_string(),
@@ -457,21 +741,7 @@ pub fn start_organize(
                     }),
                 }
 
-                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done % 25 == 0 || done == total {
-                    let _ = app_handle.emit(
-                        "organize://progress",
-                        serde_json::json!({
-                            "organizeId": id_thread,
-                            "progress": OrganizeProgress {
-                                processed: done,
-                                total,
-                                current_path: Some(src.clone()),
-                                phase: "organizing",
-                            }
-                        }),
-                    );
-                }
+                emit_organizing_progress(&app_handle, &id_thread, &processed, total, src);
             });
         }
 
@@ -480,7 +750,10 @@ pub fn start_organize(
             processed: processed.load(Ordering::Relaxed),
             copied: copied.load(Ordering::Relaxed),
             moved: moved.load(Ordering::Relaxed),
-            skipped: skipped.load(Ordering::Relaxed),
+            skipped_identical: skipped_identical.load(Ordering::Relaxed),
+            skipped_by_user: skipped_by_user.load(Ordering::Relaxed),
+            overwritten: overwritten.load(Ordering::Relaxed),
+            renamed: renamed.load(Ordering::Relaxed),
             errors: errors.into_inner().unwrap(),
             cancelled: was_cancelled,
             target: target_path.display().to_string(),
@@ -501,8 +774,22 @@ pub fn start_organize(
 
 #[tauri::command]
 pub fn cancel_organize(organize_id: String, organizes: State<ActiveOrganizes>) {
-    if let Some(flag) = organizes.0.lock().unwrap().get(&organize_id) {
-        flag.store(true, Ordering::SeqCst);
+    if let Some(handle) = organizes.0.lock().unwrap().get(&organize_id) {
+        handle.cancel.store(true, Ordering::SeqCst);
+        // Wake any worker that's currently blocked on a collision prompt so
+        // it observes the cancel and bails out.
+        handle.collision.cond.notify_all();
+    }
+}
+
+#[tauri::command]
+pub fn respond_to_collision(
+    organize_id: String,
+    decision: CollisionDecision,
+    organizes: State<ActiveOrganizes>,
+) {
+    if let Some(handle) = organizes.0.lock().unwrap().get(&organize_id) {
+        handle.collision.respond(decision);
     }
 }
 
@@ -764,38 +1051,240 @@ mod tests {
         assert!(!files_byte_identical(&a, &b).unwrap());
     }
 
+    fn dummy_emit() {}
+
     #[test]
-    fn resolve_destination_returns_desired_when_free() {
+    fn resolve_returns_use_when_destination_is_free() {
         let dir = tempdir();
         let src = dir.join("src.txt");
         write_file(&src, b"data");
         let desired = dir.join("dest").join("src.txt");
-        let result = resolve_destination(&src, desired.clone()).unwrap();
-        assert_eq!(result, Some(desired));
+        let state = CollisionState::new();
+        let cancel = CancelToken::new();
+        let result =
+            resolve_with_collision_state(&src, desired.clone(), &state, &cancel, dummy_emit).unwrap();
+        assert!(matches!(result, Resolution::Use(p) if p == desired));
     }
 
     #[test]
-    fn resolve_destination_skips_when_identical_already_at_desired() {
+    fn resolve_skips_silently_when_destination_is_byte_identical() {
+        // Regression: identical files must NOT trigger a collision prompt —
+        // there's nothing meaningful to ask about.
         let dir = tempdir();
         let src = dir.join("src.txt");
         let dest = dir.join("dest.txt");
         write_file(&src, b"same");
         write_file(&dest, b"same");
-        let result = resolve_destination(&src, dest).unwrap();
-        assert_eq!(result, None);
+        let state = CollisionState::new();
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest, &state, &cancel, || {
+            panic!("must not emit a prompt for byte-identical collisions");
+        })
+        .unwrap();
+        assert!(matches!(result, Resolution::SkipIdentical));
     }
 
     #[test]
-    fn resolve_destination_appends_suffix_on_collision() {
+    fn resolve_returns_skipped_by_user_when_apply_to_all_is_skip_all() {
+        // Real collision (different content) + sticky SkipAll → no prompt,
+        // skip recorded.
         let dir = tempdir();
         let src = dir.join("src.txt");
         let dest = dir.join("dest.txt");
         write_file(&src, b"new-content");
-        write_file(&dest, b"existing-different-content");
-        let result = resolve_destination(&src, dest.clone()).unwrap();
-        let resolved = result.unwrap();
-        assert_ne!(resolved, dest);
-        assert!(resolved.file_name().unwrap().to_str().unwrap().contains("(1)"));
+        write_file(&dest, b"existing-different");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::SkipAll);
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest, &state, &cancel, || {
+            panic!("must not prompt when apply_to_all is set");
+        })
+        .unwrap();
+        assert!(matches!(result, Resolution::SkippedByUser));
+    }
+
+    #[test]
+    fn byte_identical_obeys_sticky_overwrite_all_instead_of_skipping_silently() {
+        // Once the user has chosen Overwrite All, even byte-identical
+        // collisions must obey it (and count as overwritten), rather than
+        // being silently dropped.
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"same");
+        write_file(&dest, b"same");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::OverwriteAll);
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest.clone(), &state, &cancel, || {
+            panic!("must not prompt when apply_to_all is set");
+        })
+        .unwrap();
+        assert!(matches!(result, Resolution::Overwrite(p) if p == dest));
+    }
+
+    #[test]
+    fn byte_identical_obeys_sticky_skip_all_as_user_skip() {
+        // Skip All semantics: every collision counts as a user-skip,
+        // including byte-identical ones.
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"same");
+        write_file(&dest, b"same");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::SkipAll);
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest, &state, &cancel, || {
+            panic!("must not prompt when apply_to_all is set");
+        })
+        .unwrap();
+        assert!(matches!(result, Resolution::SkippedByUser));
+    }
+
+    #[test]
+    fn byte_identical_propagates_sticky_cancel() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"same");
+        write_file(&dest, b"same");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::Cancel);
+        let cancel = CancelToken::new();
+        let result =
+            resolve_with_collision_state(&src, dest, &state, &cancel, || {}).unwrap();
+        assert!(matches!(result, Resolution::Cancelled));
+        assert!(cancel.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_returns_overwrite_when_apply_to_all_is_overwrite_all() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"new-content");
+        write_file(&dest, b"existing-different");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::OverwriteAll);
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest.clone(), &state, &cancel, || {
+            panic!("must not prompt when apply_to_all is set");
+        })
+        .unwrap();
+        assert!(matches!(result, Resolution::Overwrite(p) if p == dest));
+    }
+
+    #[test]
+    fn resolve_renames_when_apply_to_all_is_keep_both_all() {
+        // Pins parity with the old auto-rename behavior, now opt-in.
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"new-content");
+        write_file(&dest, b"existing-different");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::KeepBothAll);
+        let cancel = CancelToken::new();
+        let result = resolve_with_collision_state(&src, dest.clone(), &state, &cancel, || {
+            panic!("must not prompt when apply_to_all is set");
+        })
+        .unwrap();
+        match result {
+            Resolution::Renamed(p) => {
+                assert_ne!(p, dest);
+                assert!(p.file_name().unwrap().to_str().unwrap().contains("(1)"));
+            }
+            other => panic!("expected Renamed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_cancelled_decision_propagates_and_sets_cancel_token() {
+        let dir = tempdir();
+        let src = dir.join("src.txt");
+        let dest = dir.join("dest.txt");
+        write_file(&src, b"new-content");
+        write_file(&dest, b"existing-different");
+        let state = CollisionState::new();
+        *state.apply_to_all.lock().unwrap() = Some(CollisionDecision::Cancel);
+        let cancel = CancelToken::new();
+        let result =
+            resolve_with_collision_state(&src, dest, &state, &cancel, || {}).unwrap();
+        assert!(matches!(result, Resolution::Cancelled));
+        assert!(cancel.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wait_if_paused_blocks_other_workers_until_response() {
+        // Worker A hits a collision and opens a prompt (paused=true). Worker B,
+        // about to start its next file, must stall at wait_if_paused until A's
+        // decision lands. Without this gate, B would race ahead and organize
+        // files in the background while the modal is up.
+        let state = std::sync::Arc::new(CollisionState::new());
+        let cancel = std::sync::Arc::new(CancelToken::new());
+
+        let started_prompt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_a = started_prompt.clone();
+        let state_a = state.clone();
+        let cancel_a = cancel.0.clone();
+        let handle_a = std::thread::spawn(move || {
+            let token = CancelToken(cancel_a);
+            state_a.await_decision(&token, || {
+                started_a.store(true, Ordering::SeqCst);
+            })
+        });
+
+        // Wait until A has emitted the prompt event (and therefore set paused).
+        while !started_prompt.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let b_passed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let b_passed_inner = b_passed.clone();
+        let state_b = state.clone();
+        let cancel_b = cancel.0.clone();
+        let handle_b = std::thread::spawn(move || {
+            let token = CancelToken(cancel_b);
+            let ok = state_b.wait_if_paused(&token);
+            b_passed_inner.store(ok, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !b_passed.load(Ordering::SeqCst),
+            "B must still be paused while A's prompt is open"
+        );
+
+        state.respond(CollisionDecision::Skip);
+
+        let decision = handle_a.join().unwrap();
+        handle_b.join().unwrap();
+        assert_eq!(decision, Some(CollisionDecision::Skip));
+        assert!(
+            b_passed.load(Ordering::SeqCst),
+            "B must pass the gate once A's prompt is resolved"
+        );
+    }
+
+    #[test]
+    fn await_decision_returns_none_when_cancel_flips() {
+        // Worker thread waits on the condvar; if cancel is set, it must
+        // wake up and return None without a frontend response.
+        let state = std::sync::Arc::new(CollisionState::new());
+        let cancel = CancelToken::new();
+        let cancel_clone = cancel.0.clone();
+        let state_clone = state.clone();
+        let handle = std::thread::spawn(move || {
+            let temp_cancel = CancelToken(cancel_clone);
+            state_clone.await_decision(&temp_cancel, || {})
+        });
+        // Give the thread a chance to enter the wait loop.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cancel.0.store(true, Ordering::SeqCst);
+        state.cond.notify_all();
+        let result = handle.join().unwrap();
+        assert!(result.is_none());
     }
 
     #[test]

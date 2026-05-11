@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 
 use crate::settings::{Filters, ScanThreads, Settings};
 
-const LARGE_FILE_THRESHOLD: u64 = 64 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD: u64 = 4 * 1024 * 1024;
 const PARTIAL_HASH_BYTES: u64 = 64 * 1024;
 
 const HASH_CHUNK_SIZE: usize = 8192;
@@ -382,6 +382,19 @@ fn hash_file_partial(path: &Path, size: u64) -> std::io::Result<blake3::Hash> {
 
     let tail_start = size.saturating_sub(PARTIAL_HASH_BYTES);
     if tail_start > head_len as u64 {
+        // Middle sample: only when the file is big enough that head, middle,
+        // and tail don't overlap. Below 3*PARTIAL_HASH_BYTES head+tail already
+        // approaches full coverage. Defends partial-hash from RAW containers
+        // (TIFF-style headers + uniform tail padding) where head and tail can
+        // match between non-identical files.
+        if size >= 3 * PARTIAL_HASH_BYTES {
+            let mid_start = (size - PARTIAL_HASH_BYTES) / 2;
+            file.seek(SeekFrom::Start(mid_start))?;
+            let mut mid = vec![0u8; PARTIAL_HASH_BYTES as usize];
+            file.read_exact(&mut mid)?;
+            hasher.update(&mid);
+        }
+
         file.seek(SeekFrom::Start(tail_start))?;
         let tail_len = (size - tail_start) as usize;
         let mut tail = vec![0u8; tail_len];
@@ -403,8 +416,10 @@ fn flatten_candidates(size_groups: Vec<(u64, Vec<PathBuf>)>) -> Vec<(PathBuf, u6
 
 /// `size <= PARTIAL_COVERS_FULL_BYTES` means the partial-hash function already
 /// read every byte of the file, so a partial-hash match is as authoritative as
-/// a full-hash match — Stage 2 can be skipped for that bucket.
-const PARTIAL_COVERS_FULL_BYTES: u64 = 2 * PARTIAL_HASH_BYTES;
+/// a full-hash match — Stage 2 can be skipped for that bucket. With the middle
+/// sample, head + middle + tail contiguously cover any file up to
+/// 3 * PARTIAL_HASH_BYTES.
+const PARTIAL_COVERS_FULL_BYTES: u64 = 3 * PARTIAL_HASH_BYTES;
 
 type ByPartial = HashMap<(u64, [u8; 32]), Vec<DuplicateFile>>;
 type RunningGroups = HashMap<(u64, [u8; 32]), (HashKind, Vec<DuplicateFile>)>;
@@ -691,16 +706,53 @@ where
     }
 
     let mut final_snapshot = build_snapshot(&final_by_key, total_files, &extension_counts);
-    resolve_dates_in_place(&pool, &mut final_snapshot);
+    resolve_dates_in_place(&pool, &mut final_snapshot, &on_progress, cancel, &last_emit);
     final_snapshot
 }
 
-fn resolve_dates_in_place(pool: &rayon::ThreadPool, scan: &mut ScanComplete) {
+fn resolve_dates_in_place<F>(
+    pool: &rayon::ThreadPool,
+    scan: &mut ScanComplete,
+    on_progress: &F,
+    cancel: &CancelToken,
+    last_emit: &Mutex<Instant>,
+) where
+    F: Fn(ScanProgress) + Sync + Send,
+{
+    // EXIF reading on RAW containers walks TIFF IFDs and can take tens of ms
+    // per file. Emit a "finalizing" phase so the UI doesn't appear stuck on
+    // the last "verifying" event while this runs.
+    let total_files: u64 = scan.groups.iter().map(|g| g.files.len() as u64).sum();
+    if total_files == 0 {
+        return;
+    }
+    let processed = AtomicU64::new(0);
+    on_progress(ScanProgress::global("finalizing", 0, total_files, None));
+
     pool.install(|| {
         scan.groups.par_iter_mut().for_each(|group| {
             for file in group.files.iter_mut() {
+                if cancel.is_cancelled() {
+                    return;
+                }
                 if file.modified_ms.is_none() {
                     file.modified_ms = resolved_date_ms(&file.path);
+                }
+                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut le) = last_emit.try_lock() {
+                    let now = Instant::now();
+                    if now.duration_since(*le).as_millis() >= HASH_EMIT_EVERY_MS
+                        || done == total_files
+                    {
+                        *le = now;
+                        drop(le);
+                        on_progress(ScanProgress::global(
+                            "finalizing",
+                            done,
+                            total_files,
+                            Some(file.path.clone()),
+                        ));
+                    }
                 }
             }
         });
@@ -818,6 +870,96 @@ mod tests {
         assert!(
             result.groups.is_empty(),
             "expected tail divergence to prevent grouping, got {:?}",
+            result.groups
+        );
+    }
+
+    #[test]
+    fn midsize_identical_files_skip_full_verify() {
+        // ARW (Sony RAW) and similar mid-size files were previously full-hashed
+        // in Stage 2, which is slow. An 8 MB pair must now be settled by the
+        // partial-hash bucket (HashKind::Partial), not re-read end-to-end.
+        let dir = tempdir();
+        let size = 8 * 1024 * 1024;
+        let bytes = vec![0x5A; size];
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        write_file(&a, &bytes);
+        write_file(&b, &bytes);
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
+
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].hash_kind, HashKind::Partial);
+        assert_eq!(result.groups[0].files.len(), 2);
+
+        assert!(
+            LARGE_FILE_THRESHOLD < 8 * 1024 * 1024,
+            "LARGE_FILE_THRESHOLD must stay small enough that mid-size files \
+             (ARW, large JPEGs, video) skip Stage 2; got {LARGE_FILE_THRESHOLD}"
+        );
+    }
+
+    #[test]
+    fn finalizing_phase_emits_progress_during_metadata_resolution() {
+        // After Stage 2, resolve_dates_in_place runs EXIF reads for every
+        // duplicate file. Previously this happened silently, leaving the UI
+        // showing the last "verifying" event for the full duration. Confirm
+        // a distinct "finalizing" phase is emitted so the UI can update.
+        let dir = tempdir();
+        let bytes = vec![0xCD; 8 * 1024 * 1024];
+        write_file(&dir.join("a.bin"), &bytes);
+        write_file(&dir.join("b.bin"), &bytes);
+
+        let phases: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let _ = run_scan(
+            vec![dir],
+            &settings,
+            &cancel,
+            |progress| {
+                phases.lock().unwrap().push(progress.phase);
+            },
+            |_| {},
+        );
+
+        let seen = phases.into_inner().unwrap();
+        assert!(
+            seen.iter().any(|p| *p == "finalizing"),
+            "expected 'finalizing' phase to be emitted, saw: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn large_files_with_matching_head_and_tail_but_different_middle_are_not_grouped() {
+        // RAW containers (ARW, NEF, …) share TIFF-style headers and can have
+        // uniform tail padding, so a head+tail-only partial hash can collide
+        // on files whose actual image data differs. The partial hash must
+        // also sample the middle to defend against this.
+        let dir = tempdir();
+        let size = LARGE_FILE_THRESHOLD as usize + 4 * 1024 * 1024;
+        let mut a_bytes = vec![0xAA; size];
+        let mut b_bytes = vec![0xAA; size];
+        // Differ only deep in the middle — head 64 KB and tail 64 KB match.
+        let mid = size / 2;
+        a_bytes[mid] = 0x01;
+        b_bytes[mid] = 0x02;
+
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        write_file(&a, &a_bytes);
+        write_file(&b, &b_bytes);
+
+        let settings = Settings::default();
+        let cancel = CancelToken::new();
+        let result = run_scan(vec![dir.clone()], &settings, &cancel, |_| {}, |_| {});
+
+        assert!(
+            result.groups.is_empty(),
+            "middle-byte divergence must prevent grouping, got {:?}",
             result.groups
         );
     }

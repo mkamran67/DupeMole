@@ -12,6 +12,7 @@ import {
 } from '../../../settings/filterPresets';
 import { formatBytes, basename } from '../../../lib/format';
 import FilterPanel from './FilterPanel';
+import DirectoryRow from './DirectoryRow';
 
 interface ScanViewProps {
   onNavigateToResults?: () => void;
@@ -26,7 +27,7 @@ interface Directory {
   scanned: boolean;
 }
 
-type ScanPhase = 'discovery' | 'hashing' | 'verifying';
+type ScanPhase = 'discovery' | 'hashing' | 'verifying' | 'finalizing';
 
 interface ScanProgressEvent {
   scanId: string;
@@ -491,6 +492,21 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
     });
   };
 
+  // Pull any directories passed on the command line (`dmole .`) once at mount.
+  // Backend parses argv at startup and stashes the resolved absolute paths.
+  useEffect(() => {
+    let cancelled = false;
+    invoke<string[]>('get_cli_paths')
+      .then((paths) => {
+        if (cancelled) return;
+        paths.forEach((p) => addDirectory(p));
+      })
+      .catch((err) => console.error('get_cli_paths failed', err));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -577,9 +593,10 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       setCurrentPath(cp);
 
       // Main bar: weighted across all stages.
-      //   discovery → 0–30%  (asymptotic — total unknown during walk)
-      //   hashing   → 30–85%
-      //   verifying → 85–99%
+      //   discovery  → 0–30%  (asymptotic — total unknown during walk)
+      //   hashing    → 30–80%
+      //   verifying  → 80–92%
+      //   finalizing → 92–99% (EXIF metadata reads on duplicate files)
       const folderFrac =
         folderIndex !== undefined && folderTotal && folderTotal > 0
           ? Math.min(1, folderIndex / folderTotal)
@@ -591,10 +608,12 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
       if (ph === 'discovery') {
         pct = 30 * (folderFrac + withinFolderAsymptote * folderSpan);
       } else if (ph === 'hashing') {
-        pct = 30 + (total > 0 ? processed / total : 0) * 55;
+        pct = 30 + (total > 0 ? processed / total : 0) * 50;
+      } else if (ph === 'verifying') {
+        pct = 80 + (total > 0 ? processed / total : 0) * 12;
       } else {
-        // verifying
-        pct = 85 + (total > 0 ? processed / total : 0) * 14;
+        // finalizing
+        pct = 92 + (total > 0 ? processed / total : 0) * 7;
       }
       const clamped = Math.max(0, Math.min(99, pct));
       setProgress(clamped);
@@ -861,35 +880,15 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
         ) : (
           <div className="space-y-3 pb-2">
             {directories.map((dir) => (
-              <div key={dir.id} className="flex items-center gap-4 p-4 rounded-xl bg-white/5 border border-white/5">
-                <div className="w-10 h-10 rounded-lg bg-[#f5c542]/10 flex items-center justify-center shrink-0">
-                  <i className="ri-folder-line text-[#f5c542] text-base"></i>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-white text-sm font-medium font-mono truncate">{dir.name}</span>
-                    <span className="text-white/40 text-xs font-mono">{dir.files.toLocaleString()} files</span>
-                  </div>
-                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-[#f5c542] transition-all duration-300"
-                      style={{ width: `${dir.progress}%` }}
-                    />
-                  </div>
-                </div>
-                {dir.scanned ? (
-                  <div className="w-8 h-8 rounded-full bg-[#f5c542]/20 flex items-center justify-center shrink-0">
-                    <i className="ri-check-line text-[#f5c542] text-sm"></i>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => removeDirectory(dir.id)}
-                    className="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-white/30 hover:text-white/60 transition-colors duration-200 cursor-pointer shrink-0"
-                  >
-                    <i className="ri-close-line text-sm"></i>
-                  </button>
-                )}
-              </div>
+              <DirectoryRow
+                key={dir.id}
+                name={dir.name}
+                files={dir.files}
+                progress={dir.progress}
+                scanned={dir.scanned}
+                scanning={scanning}
+                onRemove={() => removeDirectory(dir.id)}
+              />
             ))}
           </div>
         )}
@@ -906,7 +905,9 @@ export default function ScanView({ onNavigateToResults }: ScanViewProps) {
                   ? 'Hashing'
                   : phase === 'verifying'
                     ? 'Verifying duplicates'
-                    : 'Overall Progress'}
+                    : phase === 'finalizing'
+                      ? 'Reading metadata'
+                      : 'Overall Progress'}
             </span>
             <span className="text-[#f5c542] text-sm font-semibold">
               {Math.round(progress)}%

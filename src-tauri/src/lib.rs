@@ -1,3 +1,4 @@
+mod cli_paths;
 mod media_date;
 mod organize;
 mod results;
@@ -37,6 +38,20 @@ fn update_settings(
 #[tauri::command]
 fn get_stats(state: State<StatsState>) -> LifetimeStats {
     *state.0.lock().unwrap()
+}
+
+/// Directory paths the user passed on the command line (e.g. `dmole .`),
+/// resolved to absolute paths at app startup. Returned once on first mount
+/// so the frontend can seed the scan list.
+pub struct CliPaths(pub Vec<PathBuf>);
+
+#[tauri::command]
+fn get_cli_paths(state: State<CliPaths>) -> Vec<String> {
+    state
+        .0
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
 }
 
 #[derive(Default)]
@@ -152,16 +167,21 @@ pub fn run() {
             app.manage(StatsState(Mutex::new(loaded_stats)));
             app.manage(ActiveScans::default());
             app.manage(organize::ActiveOrganizes::default());
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            let cli = cli_paths::parse_paths(std::env::args(), &cwd);
+            app.manage(CliPaths(cli));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
             get_stats,
+            get_cli_paths,
             start_scan,
             cancel_scan,
             organize::start_organize,
             organize::cancel_organize,
+            organize::respond_to_collision,
             results::get_last_scan,
             results::delete_files,
             results::prune_last_scan,

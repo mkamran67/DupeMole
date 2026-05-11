@@ -51,6 +51,16 @@ impl Default for Filters {
     }
 }
 
+/// User-defined named file type: a label + a list of extensions, rendered
+/// alongside the built-in presets (Images, Videos, …) in the UI.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomFileType {
+    pub id: String,
+    pub label: String,
+    pub formats: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -63,6 +73,8 @@ pub struct Settings {
     pub language: String,
     pub scan_filters: Filters,
     pub organize_filters: Filters,
+    #[serde(default)]
+    pub custom_file_types: Vec<CustomFileType>,
 }
 
 impl Default for Settings {
@@ -77,6 +89,7 @@ impl Default for Settings {
             language: "English".to_string(),
             scan_filters: Filters::default(),
             organize_filters: Filters::default(),
+            custom_file_types: Vec::new(),
         }
     }
 }

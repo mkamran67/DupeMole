@@ -6,6 +6,12 @@ import { useThumbnail } from '../../../results/useThumbnail';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+// Image-bucket extensions the WebView can render directly via the asset
+// protocol when no thumbnail is available. RAW formats (arw, nef, cr2, …)
+// and HEIC are deliberately excluded — the WebView would stream tens of MB
+// and still fail to decode.
+const NATIVE_RENDERABLE_EXTS = new Set(['svg', 'avif']);
+
 function formatDuration(seconds: number): string {
   if (!isFinite(seconds) || seconds < 0) return '';
   const total = Math.floor(seconds);
@@ -104,7 +110,7 @@ export default function FilePreview({ file, onOpen }: FilePreviewProps) {
     const src = imgFailed || thumbFailed
       ? null
       : thumbSkipped
-        ? file.assetUrl
+        ? (NATIVE_RENDERABLE_EXTS.has(file.ext) ? file.assetUrl : null)
         : thumbUrl;
     return (
       <div className="w-full h-32 rounded-lg bg-black/30 border border-white/10 overflow-hidden flex items-center justify-center">

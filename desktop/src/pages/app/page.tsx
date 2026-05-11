@@ -45,7 +45,11 @@ export default function AppPage() {
           <>
             {views.map(({ id, node }) =>
               visited.has(id) ? (
-                <div key={id} style={{ display: activeTab === id ? undefined : 'none' }}>
+                <div
+                  key={id}
+                  className="h-full"
+                  style={{ display: activeTab === id ? undefined : 'none' }}
+                >
                   {node}
                 </div>
               ) : null,

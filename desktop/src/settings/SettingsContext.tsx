@@ -42,6 +42,15 @@ export function isMacos(): boolean {
   return /Mac/i.test(platform) || /Mac OS X|Macintosh/i.test(ua);
 }
 
+export interface CustomFileType {
+  /** Stable id (uuid or slug) used when persisting + toggling. */
+  id: string;
+  /** User-given label shown on the chip. */
+  label: string;
+  /** Extensions (no leading dot, case-insensitive when matched). */
+  formats: string[];
+}
+
 export interface AppSettings {
   confirmDelete: boolean;
   scanThreads: ScanThreads;
@@ -52,6 +61,7 @@ export interface AppSettings {
   language: string;
   scanFilters: AppFilters;
   organizeFilters: AppFilters;
+  customFileTypes: CustomFileType[];
 }
 
 const DEFAULTS: AppSettings = {
@@ -64,6 +74,7 @@ const DEFAULTS: AppSettings = {
   language: 'English',
   scanFilters: DEFAULT_FILTERS,
   organizeFilters: DEFAULT_FILTERS,
+  customFileTypes: [],
 };
 
 interface SettingsContextValue {
