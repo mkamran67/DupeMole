@@ -351,10 +351,10 @@ fn next_keep_both_path(source: &Path, desired: &Path) -> std::io::Result<Resolut
     Ok(Resolution::SkipIdentical) // unreachable in practice
 }
 
-/// Decide the destination outcome for one source file. Byte-identical
-/// collisions short-circuit to `SkipIdentical` with no prompt — there's
-/// nothing to do. Real collisions consult `CollisionState` for a user
-/// decision, possibly emitting a prompt event via `emit_event`.
+/// Decide the destination outcome for one source file. Every collision
+/// (including byte-identical destinations) consults `CollisionState` for a
+/// user decision so that Overwrite All / Skip All / Keep Both All / Cancel
+/// govern the whole run uniformly — no silent skips the user can't see.
 fn resolve_with_collision_state<F: FnOnce()>(
     source: &Path,
     desired: PathBuf,
@@ -364,15 +364,6 @@ fn resolve_with_collision_state<F: FnOnce()>(
 ) -> std::io::Result<Resolution> {
     if !desired.exists() {
         return Ok(Resolution::Use(desired));
-    }
-    // Byte-identical collisions skip silently ONLY when the user hasn't
-    // already chosen an "apply to all" policy. Once a sticky decision exists,
-    // honor it for every collision — including identical ones — so the
-    // chosen behavior (Overwrite All / Skip All / Cancel / Keep Both All)
-    // applies uniformly to the rest of the run.
-    let sticky = *state.apply_to_all.lock().unwrap();
-    if sticky.is_none() && files_byte_identical(source, &desired)? {
-        return Ok(Resolution::SkipIdentical);
     }
     let Some(decision) = state.await_decision(cancel, emit_event) else {
         return Ok(Resolution::Cancelled);
@@ -1067,21 +1058,40 @@ mod tests {
     }
 
     #[test]
-    fn resolve_skips_silently_when_destination_is_byte_identical() {
-        // Regression: identical files must NOT trigger a collision prompt —
-        // there's nothing meaningful to ask about.
+    fn byte_identical_collision_prompts_when_no_sticky_decision() {
+        // Identical files must trigger the collision prompt and obey the
+        // user's decision, so that Overwrite All / Skip All / Keep Both All
+        // govern the run uniformly — never a silent skip the user can't see.
         let dir = tempdir();
         let src = dir.join("src.txt");
         let dest = dir.join("dest.txt");
         write_file(&src, b"same");
         write_file(&dest, b"same");
-        let state = CollisionState::new();
+        let state = Arc::new(CollisionState::new());
         let cancel = CancelToken::new();
-        let result = resolve_with_collision_state(&src, dest, &state, &cancel, || {
-            panic!("must not emit a prompt for byte-identical collisions");
+        let emit_called = Arc::new(AtomicBool::new(false));
+
+        let state_for_responder = state.clone();
+        let responder = std::thread::spawn(move || {
+            // Wait up to ~1s for the prompt to open, then respond. Bounded so
+            // the test fails fast if the prompt never fires.
+            for _ in 0..200 {
+                if state_for_responder.inner.lock().unwrap().paused {
+                    state_for_responder.respond(CollisionDecision::OverwriteAll);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let emit_for_closure = emit_called.clone();
+        let result = resolve_with_collision_state(&src, dest.clone(), &state, &cancel, || {
+            emit_for_closure.store(true, Ordering::SeqCst);
         })
         .unwrap();
-        assert!(matches!(result, Resolution::SkipIdentical));
+        responder.join().unwrap();
+        assert!(emit_called.load(Ordering::SeqCst), "expected prompt to fire for byte-identical collision");
+        assert!(matches!(result, Resolution::Overwrite(p) if p == dest));
     }
 
     #[test]
