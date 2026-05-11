@@ -1,3 +1,4 @@
+mod analysis;
 mod cli_paths;
 mod media_date;
 mod organize;
@@ -15,8 +16,9 @@ use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+use analysis::{AnalysisProgress, AnalysisReport, AnalyzeSettings};
 use scanner::{CancelToken, ScanComplete, ScanProgress};
-use settings::{Settings, SettingsState};
+use settings::{Filters, Settings, SettingsState};
 use stats::{LifetimeStats, StatsState};
 
 #[tauri::command]
@@ -155,6 +157,80 @@ fn cancel_scan(scan_id: String, scans: State<ActiveScans>) {
     }
 }
 
+#[derive(Default)]
+pub struct ActiveAnalyses(pub Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>);
+
+fn filters_to_analyze_settings(filters: &Filters, global_ignore_hidden: bool) -> AnalyzeSettings {
+    AnalyzeSettings {
+        ignore_hidden: filters.ignore_hidden.unwrap_or(global_ignore_hidden),
+        ignore_macos_files: filters.ignore_macos_files,
+        include_subdirs: filters.include_subdirs,
+        extensions: filters.extensions.clone(),
+        ignored_extensions: filters.ignored_extensions.clone(),
+        ignored_folders: filters.ignored_folders.clone(),
+        min_size: filters.min_size,
+        max_size: filters.max_size,
+        modified_after_ms: filters.modified_after_ms,
+        modified_before_ms: filters.modified_before_ms,
+    }
+}
+
+#[tauri::command]
+fn start_analysis(
+    paths: Vec<String>,
+    analysis_id: Option<String>,
+    app: AppHandle,
+    settings_state: State<SettingsState>,
+    analyses: State<ActiveAnalyses>,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("no paths provided".into());
+    }
+    let settings = settings_state.0.lock().unwrap().clone();
+    let analyze_settings = filters_to_analyze_settings(&settings.analysis_filters, settings.ignore_hidden);
+    let id = analysis_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let cancel = analysis::CancelToken::new();
+    analyses.0.lock().unwrap().insert(id.clone(), cancel.0.clone());
+
+    let app_handle = app.clone();
+    let id_thread = id.clone();
+    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+
+    thread::spawn(move || {
+        let on_progress = {
+            let app = app_handle.clone();
+            let id = id_thread.clone();
+            move |p: AnalysisProgress| {
+                let _ = app.emit(
+                    "analysis://progress",
+                    serde_json::json!({ "analysisId": id, "progress": p }),
+                );
+            }
+        };
+
+        let report: AnalysisReport =
+            analysis::run_analysis(path_bufs, &analyze_settings, &cancel, on_progress);
+
+        let _ = app_handle.emit(
+            "analysis://complete",
+            serde_json::json!({ "analysisId": id_thread, "report": report }),
+        );
+
+        if let Some(active) = app_handle.try_state::<ActiveAnalyses>() {
+            active.0.lock().unwrap().remove(&id_thread);
+        }
+    });
+
+    Ok(id)
+}
+
+#[tauri::command]
+fn cancel_analysis(analysis_id: String, analyses: State<ActiveAnalyses>) {
+    if let Some(flag) = analyses.0.lock().unwrap().get(&analysis_id) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -166,6 +242,7 @@ pub fn run() {
             let loaded_stats = stats::load(app.handle());
             app.manage(StatsState(Mutex::new(loaded_stats)));
             app.manage(ActiveScans::default());
+            app.manage(ActiveAnalyses::default());
             app.manage(organize::ActiveOrganizes::default());
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             let cli = cli_paths::parse_paths(std::env::args(), &cwd);
@@ -179,6 +256,8 @@ pub fn run() {
             get_cli_paths,
             start_scan,
             cancel_scan,
+            start_analysis,
+            cancel_analysis,
             organize::start_organize,
             organize::cancel_organize,
             organize::respond_to_collision,

@@ -21,6 +21,9 @@ export interface AppFilters {
   modifiedBeforeMs: number | null;
   includeSubdirs: boolean;
   ignoreMacosFiles: boolean;
+  /** Per-scope override of the global ignoreHidden setting. When undefined,
+   *  consumers fall back to settings.ignoreHidden. Analysis defaults to true. */
+  ignoreHidden?: boolean;
 }
 
 export const DEFAULT_FILTERS: AppFilters = {
@@ -33,6 +36,11 @@ export const DEFAULT_FILTERS: AppFilters = {
   modifiedBeforeMs: null,
   includeSubdirs: true,
   ignoreMacosFiles: false,
+};
+
+export const DEFAULT_ANALYSIS_FILTERS: AppFilters = {
+  ...DEFAULT_FILTERS,
+  ignoreHidden: true,
 };
 
 export function isMacos(): boolean {
@@ -61,6 +69,7 @@ export interface AppSettings {
   language: string;
   scanFilters: AppFilters;
   organizeFilters: AppFilters;
+  analysisFilters: AppFilters;
   customFileTypes: CustomFileType[];
 }
 
@@ -74,6 +83,7 @@ const DEFAULTS: AppSettings = {
   language: 'English',
   scanFilters: DEFAULT_FILTERS,
   organizeFilters: DEFAULT_FILTERS,
+  analysisFilters: DEFAULT_ANALYSIS_FILTERS,
   customFileTypes: [],
 };
 
@@ -83,6 +93,7 @@ interface SettingsContextValue {
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
   updateScanFilters: (patch: Partial<AppFilters>) => Promise<void>;
   updateOrganizeFilters: (patch: Partial<AppFilters>) => Promise<void>;
+  updateAnalysisFilters: (patch: Partial<AppFilters>) => Promise<void>;
 }
 
 /**
@@ -96,11 +107,13 @@ export function migrateSettings(raw: Partial<AppSettings> & { filters?: Partial<
   const organize = raw.organizeFilters ?? legacy ?? DEFAULT_FILTERS;
   const { filters: _drop, ...rest } = raw;
   void _drop;
+  const analysis = raw.analysisFilters ?? DEFAULT_ANALYSIS_FILTERS;
   return {
     ...DEFAULTS,
     ...rest,
     scanFilters: { ...DEFAULT_FILTERS, ...scan },
     organizeFilters: { ...DEFAULT_FILTERS, ...organize },
+    analysisFilters: { ...DEFAULT_ANALYSIS_FILTERS, ...analysis },
   } as AppSettings;
 }
 
@@ -176,9 +189,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [settings]
   );
 
+  const updateAnalysisFilters = useCallback(
+    async (patch: Partial<AppFilters>) => {
+      const merged: AppSettings = {
+        ...settings,
+        analysisFilters: { ...settings.analysisFilters, ...patch },
+      };
+      await invoke('update_settings', { new: merged });
+      setSettings(merged);
+    },
+    [settings]
+  );
+
   const value = useMemo(
-    () => ({ settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters }),
-    [settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters]
+    () => ({ settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters, updateAnalysisFilters }),
+    [settings, loaded, updateSettings, updateScanFilters, updateOrganizeFilters, updateAnalysisFilters]
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

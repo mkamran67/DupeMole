@@ -33,6 +33,11 @@ pub struct Filters {
     pub modified_before_ms: Option<u64>,
     pub include_subdirs: bool,
     pub ignore_macos_files: bool,
+    /// Per-scope override of the global `ignore_hidden` setting. Currently used
+    /// by analysis filters (where the default is on regardless of the global
+    /// preference); scan/organize fall back to the global toggle when None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_hidden: Option<bool>,
 }
 
 impl Default for Filters {
@@ -47,7 +52,18 @@ impl Default for Filters {
             modified_before_ms: None,
             include_subdirs: true,
             ignore_macos_files: false,
+            ignore_hidden: None,
         }
+    }
+}
+
+/// Defaults for the Analysis page: ignore hidden ON; every other filter wide
+/// open. Surfaces dotfiles only when the user explicitly turns the toggle off.
+pub fn default_analysis_filters() -> Filters {
+    Filters {
+        ignore_hidden: Some(true),
+        include_subdirs: true,
+        ..Filters::default()
     }
 }
 
@@ -73,6 +89,7 @@ pub struct Settings {
     pub language: String,
     pub scan_filters: Filters,
     pub organize_filters: Filters,
+    pub analysis_filters: Filters,
     #[serde(default)]
     pub custom_file_types: Vec<CustomFileType>,
 }
@@ -89,6 +106,7 @@ impl Default for Settings {
             language: "English".to_string(),
             scan_filters: Filters::default(),
             organize_filters: Filters::default(),
+            analysis_filters: default_analysis_filters(),
             custom_file_types: Vec::new(),
         }
     }
@@ -182,6 +200,22 @@ mod tests {
         // Both fields removed from struct; deserialization must succeed and
         // produce defaults for everything else.
         assert!(s.confirm_delete);
+    }
+
+    #[test]
+    fn analysis_filters_default_has_ignore_hidden_on() {
+        let f = default_analysis_filters();
+        assert_eq!(f.ignore_hidden, Some(true));
+        assert!(f.extensions.is_none());
+        assert!(f.ignored_extensions.is_empty());
+        assert!(f.min_size.is_none());
+        assert!(f.include_subdirs);
+    }
+
+    #[test]
+    fn settings_default_contains_analysis_filters_with_hidden_on() {
+        let s = Settings::default();
+        assert_eq!(s.analysis_filters.ignore_hidden, Some(true));
     }
 
     #[test]

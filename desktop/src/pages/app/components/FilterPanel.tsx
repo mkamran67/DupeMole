@@ -13,19 +13,44 @@ import {
 } from '../../../settings/filterPresets';
 
 interface FilterPanelProps {
-  kind: 'scan' | 'organize';
+  kind: 'scan' | 'organize' | 'analysis';
   title?: string;
   subtitle?: string;
 }
 
 export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps) {
-  const { settings, updateScanFilters, updateOrganizeFilters, updateSettings } = useSettings();
-  const filters: AppFilters = kind === 'scan' ? settings.scanFilters : settings.organizeFilters;
+  const {
+    settings,
+    updateScanFilters,
+    updateOrganizeFilters,
+    updateAnalysisFilters,
+    updateSettings,
+  } = useSettings();
+  const filters: AppFilters =
+    kind === 'scan'
+      ? settings.scanFilters
+      : kind === 'organize'
+        ? settings.organizeFilters
+        : settings.analysisFilters;
   const updateFilters = useCallback(
     (patch: Partial<AppFilters>) =>
-      kind === 'scan' ? updateScanFilters(patch) : updateOrganizeFilters(patch),
-    [kind, updateScanFilters, updateOrganizeFilters]
+      kind === 'scan'
+        ? updateScanFilters(patch)
+        : kind === 'organize'
+          ? updateOrganizeFilters(patch)
+          : updateAnalysisFilters(patch),
+    [kind, updateScanFilters, updateOrganizeFilters, updateAnalysisFilters]
   );
+
+  // Per-scope hidden override for analysis; scan/organize use the global toggle.
+  const ignoreHiddenChecked =
+    kind === 'analysis'
+      ? (filters.ignoreHidden ?? settings.ignoreHidden)
+      : settings.ignoreHidden;
+  const toggleIgnoreHidden = () =>
+    kind === 'analysis'
+      ? updateFilters({ ignoreHidden: !ignoreHiddenChecked })
+      : updateSettings({ ignoreHidden: !settings.ignoreHidden });
 
   // Merge built-in presets with user-defined custom types so a custom chip
   // shows up here too and toggling stays in sync with OrganizeView.
@@ -120,6 +145,25 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       ? activeTypes.filter((t) => t !== id)
       : [...activeTypes, id];
     writeAllowlist(next, customExt);
+  };
+
+  // Analysis flips the file-types grid: instead of an allowlist, each preset
+  // toggles its extensions in/out of `ignoredExtensions`.
+  const presetIsExcluded = (ft: FilterTypePreset): boolean =>
+    ft.formats.length > 0 &&
+    ft.formats.every((f) =>
+      filters.ignoredExtensions.some((i) => i.toLowerCase() === f.toLowerCase())
+    );
+
+  const toggleExclusion = (ft: FilterTypePreset) => {
+    const formatsLower = ft.formats.map((f) => f.toLowerCase());
+    const set = new Set(filters.ignoredExtensions.map((e) => e.toLowerCase()));
+    if (presetIsExcluded(ft)) {
+      formatsLower.forEach((f) => set.delete(f));
+    } else {
+      formatsLower.forEach((f) => set.add(f));
+    }
+    updateFilters({ ignoredExtensions: Array.from(set) });
   };
 
   const setSizePreset = (label: string) => {
@@ -271,17 +315,37 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       )}
 
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
-        <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-4">File Types</p>
+        {kind === 'analysis' ? (
+          <div className="mb-4 flex items-center gap-2">
+            <i className="ri-forbid-2-line text-[#ff7a7a] text-sm"></i>
+            <p className="text-[#ff7a7a] text-xs font-bold uppercase tracking-wider">
+              File Types to Exclude
+            </p>
+            <span className="text-[#ff7a7a]/70 text-[10px] font-semibold uppercase tracking-wide ml-1">
+              (selected types are skipped)
+            </span>
+          </div>
+        ) : (
+          <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-4">
+            File Types
+          </p>
+        )}
         <div className="grid grid-cols-3 md:grid-cols-6 gap-2.5">
           {filterTypes.map((ft) => {
-            const active = activeTypes.includes(ft.id);
+            const active =
+              kind === 'analysis' ? presetIsExcluded(ft) : activeTypes.includes(ft.id);
+            const activeBorder = kind === 'analysis' ? 'border-[#ff7a7a]' : 'border-[#f5c542]';
+            const activeBg = kind === 'analysis' ? 'bg-[#ff7a7a]/10' : 'bg-[#f5c542]/10';
+            const activeChipBg = kind === 'analysis' ? 'bg-[#ff7a7a]' : 'bg-[#f5c542]';
+            const activeIconColor = kind === 'analysis' ? 'text-white' : 'text-[#2c1810]';
+            const activeLabelColor = kind === 'analysis' ? 'text-[#ff7a7a]' : 'text-[#f5c542]';
             return (
               <button
                 key={ft.id}
-                onClick={() => toggleType(ft.id)}
+                onClick={() => (kind === 'analysis' ? toggleExclusion(ft) : toggleType(ft.id))}
                 className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all duration-200 cursor-pointer relative group ${
                   active
-                    ? 'border-[#f5c542] bg-[#f5c542]/10'
+                    ? `${activeBorder} ${activeBg}`
                     : 'border-white/10 hover:border-white/20'
                 }`}
               >
@@ -294,12 +358,12 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
                 </div>
                 <div
                   className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors duration-200 ${
-                    active ? 'bg-[#f5c542]' : 'bg-white/5'
+                    active ? activeChipBg : 'bg-white/5'
                   }`}
                 >
-                  <i className={`${ft.icon} text-sm ${active ? 'text-[#2c1810]' : 'text-white/40'}`}></i>
+                  <i className={`${ft.icon} text-sm ${active ? activeIconColor : 'text-white/40'}`}></i>
                 </div>
-                <span className={`text-xs font-medium ${active ? 'text-[#f5c542]' : 'text-white/50'}`}>
+                <span className={`text-xs font-medium ${active ? activeLabelColor : 'text-white/50'}`}>
                   {ft.label}
                 </span>
               </button>
@@ -308,6 +372,7 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
         </div>
       </div>
 
+      {kind !== 'analysis' && (
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">
           {filters.extensions ? 'Selected Extensions' : 'All Extensions Included'}
@@ -342,6 +407,7 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
           </div>
         )}
       </div>
+      )}
 
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 space-y-6">
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-1">Ignore</p>
@@ -433,6 +499,7 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
         </div>
       </div>
 
+      {kind !== 'analysis' && (
       <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
         <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Custom Extensions</p>
         <div className="flex gap-2">
@@ -462,6 +529,7 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
           Type one or more comma-separated extensions and press Enter or click +.
         </p>
       </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
@@ -544,14 +612,14 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
             <p className="text-white/30 text-xs mt-0.5">Skip files starting with a dot</p>
           </div>
           <button
-            onClick={() => updateSettings({ ignoreHidden: !settings.ignoreHidden })}
+            onClick={toggleIgnoreHidden}
             className={`relative w-12 h-7 rounded-full transition-colors duration-300 cursor-pointer ${
-              settings.ignoreHidden ? 'bg-[#f5c542]' : 'bg-white/10'
+              ignoreHiddenChecked ? 'bg-[#f5c542]' : 'bg-white/10'
             }`}
           >
             <div
               className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300 ${
-                settings.ignoreHidden ? 'translate-x-6' : 'translate-x-1'
+                ignoreHiddenChecked ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
           </button>
@@ -581,7 +649,7 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
             </div>
           </>
         )}
-        {kind === 'scan' && (
+        {(kind === 'scan' || kind === 'analysis') && (
           <>
             <div className="border-t border-white/5" />
             <div className="flex items-center justify-between">
