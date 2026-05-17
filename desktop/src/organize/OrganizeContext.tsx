@@ -50,6 +50,10 @@ interface OrganizeProgressEvent {
     total: number;
     currentPath: string | null;
     phase: OrganizePhase;
+    bytesProcessed?: number;
+    elapsedMs?: number;
+    currentFileBytes?: number;
+    currentFileTotal?: number;
   };
 }
 
@@ -66,6 +70,9 @@ export interface OrganizeContextValue {
   total: number;
   currentPath: string | null;
   op: OrganizeOp | null;
+  speedBytesPerSec: number | null;
+  currentFileBytes: number | null;
+  currentFileTotal: number | null;
   startOrganize: (args: OrganizeStartArgs) => Promise<string | null>;
   cancelOrganize: () => Promise<void>;
   onProgress: (cb: (e: OrganizeProgressEvent['progress']) => void) => () => void;
@@ -82,6 +89,12 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
   const [total, setTotal] = useState(0);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [op, setOp] = useState<OrganizeOp | null>(null);
+  const [speedBytesPerSec, setSpeedBytesPerSec] = useState<number | null>(null);
+  const [currentFileBytes, setCurrentFileBytes] = useState<number | null>(null);
+  const [currentFileTotal, setCurrentFileTotal] = useState<number | null>(null);
+  // Sliding window of recent (bytes, ms) samples used to smooth speed across
+  // chunk-level emits. Last 1s worth of data.
+  const speedWindow = useRef<{ bytes: number; ms: number }[]>([]);
 
   const activeId = useRef<string | null>(null);
   const progressSubs = useRef<Set<(e: OrganizeProgressEvent['progress']) => void>>(
@@ -124,6 +137,37 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
       setProcessed(p.processed);
       setTotal(p.total);
       setCurrentPath(p.currentPath);
+      setCurrentFileBytes(
+        typeof p.currentFileBytes === 'number' ? p.currentFileBytes : null
+      );
+      setCurrentFileTotal(
+        typeof p.currentFileTotal === 'number' ? p.currentFileTotal : null
+      );
+      if (
+        p.phase === 'organizing' &&
+        typeof p.bytesProcessed === 'number' &&
+        typeof p.elapsedMs === 'number'
+      ) {
+        const WINDOW_MS = 1000;
+        const sample = { bytes: p.bytesProcessed, ms: p.elapsedMs };
+        const window = speedWindow.current;
+        window.push(sample);
+        // Drop samples older than WINDOW_MS relative to the latest one.
+        while (window.length > 1 && sample.ms - window[0].ms > WINDOW_MS) {
+          window.shift();
+        }
+        if (window.length >= 2) {
+          const oldest = window[0];
+          const dB = sample.bytes - oldest.bytes;
+          const dMs = sample.ms - oldest.ms;
+          if (dMs > 0 && dB >= 0) {
+            setSpeedBytesPerSec((dB / dMs) * 1000);
+          }
+        }
+      } else {
+        speedWindow.current = [];
+        setSpeedBytesPerSec(null);
+      }
       progressSubs.current.forEach((cb) => cb(p));
     }).then((u) => (unP = u));
 
@@ -132,6 +176,10 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
       setRunning(false);
       setPhase(null);
       setCurrentPath(null);
+      setSpeedBytesPerSec(null);
+      setCurrentFileBytes(null);
+      setCurrentFileTotal(null);
+      speedWindow.current = [];
       activeId.current = null;
       completeSubs.current.forEach((cb) => cb(e.payload.result));
     }).then((u) => (unC = u));
@@ -164,6 +212,10 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
     setTotal(0);
     setCurrentPath(null);
     setOp(args.op);
+    setSpeedBytesPerSec(null);
+    setCurrentFileBytes(null);
+    setCurrentFileTotal(null);
+    speedWindow.current = [];
 
     const id =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -212,6 +264,9 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
       total,
       currentPath,
       op,
+      speedBytesPerSec,
+      currentFileBytes,
+      currentFileTotal,
       startOrganize,
       cancelOrganize,
       onProgress,
@@ -226,6 +281,9 @@ export function OrganizeProvider({ children }: { children: ReactNode }) {
       total,
       currentPath,
       op,
+      speedBytesPerSec,
+      currentFileBytes,
+      currentFileTotal,
       startOrganize,
       cancelOrganize,
       onProgress,

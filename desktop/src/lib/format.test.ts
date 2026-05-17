@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatBytes, basename, dirname, formatDate } from './format';
+import { formatBytes, basename, dirname, formatDate, formatRate } from './format';
 
 describe('formatBytes', () => {
   it('renders sub-KB values in bytes', () => {
@@ -65,6 +65,31 @@ describe('dirname', () => {
   it('returns empty string when no separator is present', () => {
     expect(dirname('file.txt')).toBe('');
     expect(dirname('')).toBe('');
+  });
+});
+
+describe('formatRate', () => {
+  it('returns empty string for null / NaN / negative / non-finite', () => {
+    expect(formatRate(null)).toBe('');
+    expect(formatRate(NaN)).toBe('');
+    expect(formatRate(-1)).toBe('');
+    expect(formatRate(Infinity)).toBe('');
+  });
+
+  it('formats 0 B/s', () => {
+    expect(formatRate(0)).toBe('0 B/s');
+  });
+
+  it('formats sub-KB rates', () => {
+    expect(formatRate(512)).toBe('512 B/s');
+  });
+
+  it('formats MB/s rates', () => {
+    expect(formatRate(1.5 * 1024 * 1024)).toBe('1.50 MB/s');
+  });
+
+  it('formats very large rates with /s suffix', () => {
+    expect(formatRate(5 * 1024 * 1024 * 1024).endsWith('GB/s')).toBe(true);
   });
 });
 

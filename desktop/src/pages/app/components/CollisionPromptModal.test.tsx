@@ -63,6 +63,14 @@ describe('CollisionPromptModal', () => {
     });
   });
 
+  it('renders above the OrganizeProgressModal (stacks via higher z-index)', () => {
+    render(<CollisionPromptModal event={baseEvent} onResolved={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    // OrganizeProgressModal sits at z-50. The collision prompt must be above it
+    // so the user can actually see and respond to it.
+    expect(dialog.className).toMatch(/z-\[60\]/);
+  });
+
   it('renders both paths and sizes', () => {
     render(<CollisionPromptModal event={baseEvent} onResolved={vi.fn()} />);
     expect(screen.getByText(/already exists/)).toBeInTheDocument();

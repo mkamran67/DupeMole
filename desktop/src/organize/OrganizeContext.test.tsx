@@ -39,6 +39,9 @@ function Probe() {
       <div data-testid="processed">{o.processed}</div>
       <div data-testid="total">{o.total}</div>
       <div data-testid="op">{o.op ?? 'null'}</div>
+      <div data-testid="speed">{o.speedBytesPerSec ?? 'null'}</div>
+      <div data-testid="cfb">{o.currentFileBytes ?? 'null'}</div>
+      <div data-testid="cft">{o.currentFileTotal ?? 'null'}</div>
       <button
         onClick={() =>
           o.startOrganize({
@@ -131,6 +134,185 @@ describe('OrganizeContext', () => {
     const pct = Number(screen.getByTestId('progress').textContent);
     expect(pct).toBeGreaterThanOrEqual(59);
     expect(pct).toBeLessThanOrEqual(61);
+  });
+
+  it('derives speedBytesPerSec from byte/elapsed deltas between two organizing samples', async () => {
+    wrap();
+    await flush();
+    await act(async () => {
+      screen.getByText('start').click();
+    });
+    await flush();
+    await act(async () => {
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 10,
+            total: 100,
+            currentPath: '/x',
+            phase: 'organizing',
+            bytesProcessed: 1_000_000,
+            elapsedMs: 1000,
+          },
+        },
+      });
+    });
+    // First sample: no prior → speed null
+    expect(screen.getByTestId('speed').textContent).toBe('null');
+    await act(async () => {
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 20,
+            total: 100,
+            currentPath: '/y',
+            phase: 'organizing',
+            bytesProcessed: 3_000_000,
+            elapsedMs: 2000,
+          },
+        },
+      });
+    });
+    // Δbytes = 2_000_000, Δms = 1000 → 2_000_000 B/s
+    expect(Number(screen.getByTestId('speed').textContent)).toBe(2_000_000);
+  });
+
+  it('resets speedBytesPerSec when phase leaves organizing', async () => {
+    wrap();
+    await flush();
+    await act(async () => {
+      screen.getByText('start').click();
+    });
+    await flush();
+    await act(async () => {
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 1,
+            total: 10,
+            currentPath: '/x',
+            phase: 'organizing',
+            bytesProcessed: 1000,
+            elapsedMs: 100,
+          },
+        },
+      });
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 2,
+            total: 10,
+            currentPath: '/y',
+            phase: 'organizing',
+            bytesProcessed: 2000,
+            elapsedMs: 200,
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('speed').textContent).not.toBe('null');
+    await act(async () => {
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 5,
+            total: 0,
+            currentPath: '/z',
+            phase: 'walking',
+            bytesProcessed: 0,
+            elapsedMs: 0,
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('speed').textContent).toBe('null');
+  });
+
+  it('exposes currentFileBytes/currentFileTotal from progress events and clears them on complete', async () => {
+    wrap();
+    await flush();
+    await act(async () => {
+      screen.getByText('start').click();
+    });
+    await flush();
+    await act(async () => {
+      progressHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          progress: {
+            processed: 1,
+            total: 10,
+            currentPath: '/big',
+            phase: 'organizing',
+            bytesProcessed: 5_000_000,
+            elapsedMs: 500,
+            currentFileBytes: 4_000_000,
+            currentFileTotal: 10_000_000,
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('cfb').textContent).toBe('4000000');
+    expect(screen.getByTestId('cft').textContent).toBe('10000000');
+    await act(async () => {
+      completeHandler?.({
+        payload: {
+          organizeId: 'org-1',
+          result: {
+            processed: 1,
+            copied: 1,
+            moved: 0,
+            skippedIdentical: 0,
+            skippedByUser: 0,
+            overwritten: 0,
+            renamed: 0,
+            metadataWritten: 0,
+            metadataWriteFailed: 0,
+            errors: [],
+            cancelled: false,
+            target: '/t',
+          },
+        },
+      });
+    });
+    await flush();
+    expect(screen.getByTestId('cfb').textContent).toBe('null');
+    expect(screen.getByTestId('cft').textContent).toBe('null');
+  });
+
+  it('sliding-window speed averages across recent samples', async () => {
+    wrap();
+    await flush();
+    await act(async () => {
+      screen.getByText('start').click();
+    });
+    await flush();
+    // 3 emits 100ms apart, each adding 1 MB → 1 MB / 100 ms = 10 MB/s.
+    for (let i = 1; i <= 3; i++) {
+      await act(async () => {
+        progressHandler?.({
+          payload: {
+            organizeId: 'org-1',
+            progress: {
+              processed: 0,
+              total: 10,
+              currentPath: '/big',
+              phase: 'organizing',
+              bytesProcessed: i * 1_000_000,
+              elapsedMs: i * 100,
+            },
+          },
+        });
+      });
+    }
+    const speed = Number(screen.getByTestId('speed').textContent);
+    // Window spans 100→300ms → (3M - 1M) / (300 - 100) * 1000 = 10_000_000 B/s.
+    expect(speed).toBe(10_000_000);
   });
 
   it('cancel before start does not invoke cancel_organize', async () => {

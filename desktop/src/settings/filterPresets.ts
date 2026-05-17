@@ -51,14 +51,6 @@ export const FILTER_TYPE_PRESETS: FilterTypePreset[] = [
 
 export const SCAN_VIEW_BUCKETS = ['images', 'videos', 'pdfs', 'audio'] as const;
 
-export const SIZE_PRESETS: { label: string; min?: number; max?: number }[] = [
-  { label: 'Any' },
-  { label: '< 1 MB', max: 1024 * 1024 - 1 },
-  { label: '1 - 10 MB', min: 1024 * 1024, max: 10 * 1024 * 1024 },
-  { label: '10 - 100 MB', min: 10 * 1024 * 1024, max: 100 * 1024 * 1024 },
-  { label: '> 100 MB', min: 100 * 1024 * 1024 },
-];
-
 export const DATE_PRESETS: { label: string; days?: number }[] = [
   { label: 'Any time' },
   { label: 'Today', days: 1 },
@@ -66,15 +58,6 @@ export const DATE_PRESETS: { label: string; days?: number }[] = [
   { label: 'This month', days: 30 },
   { label: 'This year', days: 365 },
 ];
-
-export function sizePresetLabel(min?: number | null, max?: number | null): string {
-  for (const p of SIZE_PRESETS) {
-    if ((p.min ?? null) === (min ?? null) && (p.max ?? null) === (max ?? null)) {
-      return p.label;
-    }
-  }
-  return 'Any';
-}
 
 export function datePresetLabel(afterMs?: number | null): string {
   if (!afterMs) return 'Any time';

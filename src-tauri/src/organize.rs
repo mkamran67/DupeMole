@@ -185,6 +185,12 @@ pub struct OrganizeProgress {
     pub total: u64,
     pub current_path: Option<PathBuf>,
     pub phase: &'static str,
+    pub bytes_processed: u64,
+    pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file_total: Option<u64>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -591,6 +597,8 @@ fn emit_organizing_progress(
     processed: &AtomicU64,
     total: u64,
     src: &Path,
+    bytes_processed: &AtomicU64,
+    started: std::time::Instant,
 ) {
     let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
     if done % 25 == 0 || done == total {
@@ -603,22 +611,97 @@ fn emit_organizing_progress(
                     total,
                     current_path: Some(src.to_path_buf()),
                     phase: "organizing",
+                    bytes_processed: bytes_processed.load(Ordering::Relaxed),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    current_file_bytes: None,
+                    current_file_total: None,
                 }
             }),
         );
     }
 }
 
-fn move_file(source: &Path, dest: &Path) -> std::io::Result<()> {
+/// Result of a move: did the OS rename it atomically, or did we stream-copy it?
+pub(crate) enum MoveOutcome {
+    /// Atomic same-volume rename; no chunked progress was reported.
+    Renamed,
+    /// Cross-device fallback: bytes were already reported via `on_chunk`.
+    CopiedStreaming,
+}
+
+fn move_file<F: FnMut(u64)>(
+    source: &Path,
+    dest: &Path,
+    on_chunk: F,
+) -> std::io::Result<MoveOutcome> {
     match std::fs::rename(source, dest) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(MoveOutcome::Renamed),
         Err(_) => {
             // Cross-device (or other rename failure) — fall back to copy + remove.
-            std::fs::copy(source, dest)?;
+            copy_with_progress(source, dest, on_chunk)?;
             std::fs::remove_file(source)?;
-            Ok(())
+            Ok(MoveOutcome::CopiedStreaming)
         }
     }
+}
+
+const COPY_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Copy a file from `source` to `dest`, reading/writing in fixed-size chunks
+/// and reporting cumulative bytes written via `on_chunk(bytes_written_so_far)`.
+///
+/// Callback is invoked once per chunk written; for empty files it is not
+/// invoked. Throttling/aggregation is the caller's responsibility.
+pub(crate) fn copy_with_progress<F: FnMut(u64)>(
+    source: &Path,
+    dest: &Path,
+    mut on_chunk: F,
+) -> std::io::Result<u64> {
+    use std::io::{Read, Write};
+    let mut src = std::fs::File::open(source)?;
+    let mut dst = std::fs::File::create(dest)?;
+    let mut buf = vec![0u8; COPY_CHUNK_SIZE];
+    let mut total: u64 = 0;
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n])?;
+        total += n as u64;
+        on_chunk(total);
+    }
+    dst.flush()?;
+    Ok(total)
+}
+
+fn emit_chunk_progress(
+    app: &AppHandle,
+    id: &str,
+    processed: &AtomicU64,
+    total_files: u64,
+    src: &Path,
+    bytes_processed: &AtomicU64,
+    started: std::time::Instant,
+    current_file_bytes: u64,
+    current_file_total: u64,
+) {
+    let _ = app.emit(
+        "organize://progress",
+        serde_json::json!({
+            "organizeId": id,
+            "progress": OrganizeProgress {
+                processed: processed.load(Ordering::Relaxed),
+                total: total_files,
+                current_path: Some(src.to_path_buf()),
+                phase: "organizing",
+                bytes_processed: bytes_processed.load(Ordering::Relaxed),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                current_file_bytes: Some(current_file_bytes),
+                current_file_total: Some(current_file_total),
+            }
+        }),
+    );
 }
 
 #[tauri::command]
@@ -682,6 +765,10 @@ pub fn start_organize(
             total: 0,
             current_path: None,
             phase: "walking",
+            bytes_processed: 0,
+            elapsed_ms: 0,
+            current_file_bytes: None,
+            current_file_total: None,
         });
 
         // Phase 1: walk
@@ -739,6 +826,10 @@ pub fn start_organize(
                         total: 0,
                         current_path: Some(path),
                         phase: "walking",
+                        bytes_processed: 0,
+                        elapsed_ms: 0,
+                        current_file_bytes: None,
+                        current_file_total: None,
                     });
                 }
             }
@@ -747,11 +838,17 @@ pub fn start_organize(
         let total = files.len() as u64;
         let cancelled_during_walk = cancel.0.load(Ordering::SeqCst);
 
+        let organize_started = std::time::Instant::now();
+        let bytes_processed = AtomicU64::new(0);
         emit_progress(OrganizeProgress {
             processed: 0,
             total,
             current_path: None,
             phase: "organizing",
+            bytes_processed: 0,
+            elapsed_ms: 0,
+            current_file_bytes: None,
+            current_file_total: None,
         });
 
         let processed = AtomicU64::new(0);
@@ -793,7 +890,7 @@ pub fn start_organize(
                     category,
                 ) {
                     skipped_existing_metadata.fetch_add(1, Ordering::Relaxed);
-                    emit_organizing_progress(&app_handle, &id_thread, &processed, total, src);
+                    emit_organizing_progress(&app_handle, &id_thread, &processed, total, src, &bytes_processed, organize_started);
                     return;
                 }
 
@@ -894,6 +991,8 @@ pub fn start_organize(
                             &processed,
                             total,
                             src,
+                            &bytes_processed,
+                            organize_started,
                         );
                         return;
                     }
@@ -905,6 +1004,8 @@ pub fn start_organize(
                             &processed,
                             total,
                             src,
+                            &bytes_processed,
+                            organize_started,
                         );
                         return;
                     }
@@ -927,13 +1028,56 @@ pub fn start_organize(
                     }
                 }
 
+                let mut chunked_bytes_added: u64 = 0;
+                let mut last_chunk_emit = std::time::Instant::now();
+                let app_handle_chunk = &app_handle;
+                let id_thread_chunk = id_thread.as_str();
+                let processed_ref = &processed;
+                let bytes_processed_ref = &bytes_processed;
+                let src_chunk = src.as_path();
+                let mut on_chunk = |bytes_written: u64| {
+                    let delta = bytes_written.saturating_sub(chunked_bytes_added);
+                    if delta > 0 {
+                        bytes_processed_ref.fetch_add(delta, Ordering::Relaxed);
+                        chunked_bytes_added = bytes_written;
+                    }
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_chunk_emit).as_millis() >= 120 {
+                        last_chunk_emit = now;
+                        emit_chunk_progress(
+                            app_handle_chunk,
+                            id_thread_chunk,
+                            processed_ref,
+                            total,
+                            src_chunk,
+                            bytes_processed_ref,
+                            organize_started,
+                            bytes_written,
+                            source_size,
+                        );
+                    }
+                };
+
                 let result = match op {
-                    OrganizeOp::Copy => std::fs::copy(src, &dest).map(|_| ()),
-                    OrganizeOp::Move => move_file(src, &dest),
+                    OrganizeOp::Copy => copy_with_progress(src, &dest, &mut on_chunk).map(|_| true),
+                    OrganizeOp::Move => move_file(src, &dest, &mut on_chunk).map(|outcome| {
+                        matches!(outcome, MoveOutcome::CopiedStreaming)
+                    }),
                 };
 
                 match result {
-                    Ok(()) => {
+                    Ok(streamed) => {
+                        // If we didn't stream chunks (atomic rename), bytes
+                        // weren't reported via the callback — add them now.
+                        if !streamed {
+                            bytes_processed.fetch_add(source_size, Ordering::Relaxed);
+                        } else if chunked_bytes_added < source_size {
+                            // Cover any tail (e.g. file shorter than metadata).
+                            bytes_processed.fetch_add(
+                                source_size - chunked_bytes_added,
+                                Ordering::Relaxed,
+                            );
+                        }
                         match kind {
                             ResolutionKind::Overwrite => {
                                 overwritten.fetch_add(1, Ordering::Relaxed);
@@ -992,7 +1136,7 @@ pub fn start_organize(
                     }),
                 }
 
-                emit_organizing_progress(&app_handle, &id_thread, &processed, total, src);
+                emit_organizing_progress(&app_handle, &id_thread, &processed, total, src, &bytes_processed, organize_started);
             });
         }
 
@@ -1058,6 +1202,109 @@ pub fn respond_to_collision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn organize_progress_serializes_bytes_and_elapsed_in_camel_case() {
+        let p = OrganizeProgress {
+            processed: 3,
+            total: 10,
+            current_path: None,
+            phase: "organizing",
+            bytes_processed: 4096,
+            elapsed_ms: 1500,
+            current_file_bytes: None,
+            current_file_total: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["bytesProcessed"], 4096);
+        assert_eq!(v["elapsedMs"], 1500);
+        assert_eq!(v["processed"], 3);
+        assert_eq!(v["phase"], "organizing");
+    }
+
+    #[test]
+    fn copy_with_progress_reports_chunks_and_copies_bytes() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("big.bin");
+        let dst = dir.path().join("big.bin.copy");
+        // 4 MiB of distinguishable bytes.
+        let size = 4 * COPY_CHUNK_SIZE;
+        {
+            let mut f = std::fs::File::create(&src).unwrap();
+            let chunk = vec![0xABu8; 64 * 1024];
+            let mut written = 0;
+            while written < size {
+                let n = (size - written).min(chunk.len());
+                f.write_all(&chunk[..n]).unwrap();
+                written += n;
+            }
+        }
+        let mut samples: Vec<u64> = Vec::new();
+        let total = copy_with_progress(&src, &dst, |b| samples.push(b)).unwrap();
+        assert_eq!(total, size as u64);
+        assert!(samples.len() >= 4, "expected >=4 chunk callbacks, got {}", samples.len());
+        for w in samples.windows(2) {
+            assert!(w[1] > w[0], "callback byte counts must be strictly increasing");
+        }
+        assert_eq!(*samples.last().unwrap(), size as u64);
+        let src_bytes = std::fs::read(&src).unwrap();
+        let dst_bytes = std::fs::read(&dst).unwrap();
+        assert_eq!(src_bytes, dst_bytes);
+    }
+
+    #[test]
+    fn copy_with_progress_missing_source_returns_err_no_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("does-not-exist");
+        let dst = dir.path().join("out");
+        let mut called = false;
+        let result = copy_with_progress(&src, &dst, |_| called = true);
+        assert!(result.is_err());
+        assert!(!called);
+    }
+
+    #[test]
+    fn copy_with_progress_empty_file_no_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("empty");
+        let dst = dir.path().join("empty.copy");
+        std::fs::write(&src, b"").unwrap();
+        let mut samples: Vec<u64> = Vec::new();
+        let total = copy_with_progress(&src, &dst, |b| samples.push(b)).unwrap();
+        assert_eq!(total, 0);
+        assert!(samples.is_empty());
+        assert!(dst.exists());
+    }
+
+    #[test]
+    fn copy_with_progress_exact_buffer_size_one_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("one-buf");
+        let dst = dir.path().join("one-buf.copy");
+        let payload = vec![0x42u8; COPY_CHUNK_SIZE];
+        std::fs::write(&src, &payload).unwrap();
+        let mut samples: Vec<u64> = Vec::new();
+        let total = copy_with_progress(&src, &dst, |b| samples.push(b)).unwrap();
+        assert_eq!(total, COPY_CHUNK_SIZE as u64);
+        // Read may return short; allow up to 2 callbacks but require final = size.
+        assert!(!samples.is_empty() && samples.len() <= 2);
+        assert_eq!(*samples.last().unwrap(), COPY_CHUNK_SIZE as u64);
+    }
+
+    #[test]
+    fn move_file_same_dir_uses_rename_outcome_no_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        let dst = dir.path().join("b.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let mut called = false;
+        let outcome = move_file(&src, &dst, |_| called = true).unwrap();
+        assert!(matches!(outcome, MoveOutcome::Renamed));
+        assert!(!called);
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+    }
 
     #[test]
     fn unix_ms_to_civil_known_dates() {
@@ -1669,7 +1916,7 @@ mod tests {
         let src = dir.join("a.txt");
         let dest = dir.join("b.txt");
         write_file(&src, b"hello");
-        move_file(&src, &dest).unwrap();
+        move_file(&src, &dest, |_| {}).unwrap();
         assert!(!src.exists());
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
     }
@@ -1860,7 +2107,7 @@ mod tests {
         let dest_dir = dir.join("Images/2025/02-February");
         std::fs::create_dir_all(&dest_dir).unwrap();
         let dest = dest_dir.join("2025-02-11.jpg");
-        move_file(&src, &dest).unwrap();
+        move_file(&src, &dest, |_| {}).unwrap();
         assert!(!src.exists());
         assert_eq!(crate::media_date::read_metadata_ms(&dest), Some(ms));
     }

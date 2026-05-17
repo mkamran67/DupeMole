@@ -1,8 +1,20 @@
 import { useOrganize } from '../../../organize/OrganizeContext';
+import { formatRate } from '../../../lib/format';
 
 export default function OrganizeProgressModal() {
-  const { running, progress, phase, processed, total, currentPath, op, cancelOrganize } =
-    useOrganize();
+  const {
+    running,
+    progress,
+    phase,
+    processed,
+    total,
+    currentPath,
+    op,
+    speedBytesPerSec,
+    currentFileBytes,
+    currentFileTotal,
+    cancelOrganize,
+  } = useOrganize();
 
   if (!running) return null;
 
@@ -39,15 +51,58 @@ export default function OrganizeProgressModal() {
 
         <div className="mt-5 mb-3 flex items-center justify-between">
           <span className="text-white/60 text-xs font-mono">{counts}</span>
-          <span className="text-[#f5c542] text-sm font-semibold">{pct}%</span>
+          <div className="flex items-center gap-3">
+            {phase === 'organizing' && formatRate(speedBytesPerSec) && (
+              <span className="text-white/60 text-xs font-mono">
+                {formatRate(speedBytesPerSec)}
+              </span>
+            )}
+            <span className="text-[#f5c542] text-sm font-semibold">{pct}%</span>
+          </div>
         </div>
 
-        <div className="h-3 bg-white/10 rounded-full overflow-hidden">
-          <div
-            className="h-full rounded-full bg-[#f5c542] transition-all duration-150"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
+        {(() => {
+          const showFileBar =
+            phase === 'organizing' &&
+            typeof currentFileTotal === 'number' &&
+            currentFileTotal > 0;
+          const filePct = showFileBar
+            ? Math.min(100, Math.max(0, ((currentFileBytes ?? 0) / currentFileTotal!) * 100))
+            : 0;
+          return (
+            <>
+              {showFileBar && (
+                <div
+                  className="h-2 bg-white/10 rounded-full overflow-hidden mb-2"
+                  role="progressbar"
+                  aria-label="current file progress"
+                  aria-valuenow={Math.round(filePct)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full rounded-full bg-[#f5c542]/60 transition-all duration-100"
+                    style={{ width: `${filePct}%` }}
+                  />
+                </div>
+              )}
+
+              <div
+                className="h-3 bg-white/10 rounded-full overflow-hidden"
+                role="progressbar"
+                aria-label="overall progress"
+                aria-valuenow={Math.round(progress)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="h-full rounded-full bg-[#f5c542] transition-all duration-150"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </>
+          );
+        })()}
 
         <div
           className="mt-3 text-white/40 text-xs font-mono truncate"

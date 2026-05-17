@@ -1,6 +1,6 @@
 [package]
 name = "dupemole"
-version = "0.3.0"
+version = "0.5.0"
 description = "DupeMole - Find Duplicate Files Fast"
 authors = ["DupeMole"]
 edition = "2021"

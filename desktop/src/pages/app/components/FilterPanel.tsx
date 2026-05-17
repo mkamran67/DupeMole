@@ -2,12 +2,10 @@ import { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { isMacos, useSettings, type AppFilters } from '../../../settings/SettingsContext';
 import SizeRangeSlider from './SizeRangeSlider';
 import {
-  SIZE_PRESETS,
   DATE_PRESETS,
   buildExtensionAllowlist,
   deriveActiveTypeIds,
   mergePresets,
-  sizePresetLabel,
   datePresetLabel,
   datePresetToAfterMs,
   type FilterTypePreset,
@@ -95,7 +93,6 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       .filter((v, i, a) => a.indexOf(v) === i);
   }, [customExt]);
 
-  const sizePreset = sizePresetLabel(filters.minSize, filters.maxSize);
   const datePreset = datePresetLabel(filters.modifiedAfterMs);
 
   const ignoredFolders = filters.ignoredFolders;
@@ -141,11 +138,6 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       formatsLower.forEach((f) => set.add(f));
     }
     updateFilters({ ignoredExtensions: Array.from(set) });
-  };
-
-  const setSizePreset = (label: string) => {
-    const p = SIZE_PRESETS.find((s) => s.label === label) ?? SIZE_PRESETS[0];
-    updateFilters({ minSize: p.min ?? null, maxSize: p.max ?? null });
   };
 
   const setDatePreset = (label: string) => {
@@ -511,29 +503,11 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
           <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">File Size</p>
-          <div className="flex flex-wrap gap-2">
-            {SIZE_PRESETS.map((p) => (
-              <button
-                key={p.label}
-                onClick={() => setSizePreset(p.label)}
-                className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-all duration-200 cursor-pointer whitespace-nowrap ${
-                  sizePreset === p.label
-                    ? 'border-[#f5c542] bg-[#f5c542]/10 text-[#f5c542]'
-                    : 'border-white/10 text-white/50 hover:border-white/20'
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-          <div className="mt-4 pt-4 border-t border-white/5">
-            <p className="text-white/40 text-[11px] font-medium mb-3">Size Range</p>
-            <SizeRangeSlider
-              minSize={filters.minSize}
-              maxSize={filters.maxSize}
-              onChange={({ minSize, maxSize }) => updateFilters({ minSize, maxSize })}
-            />
-          </div>
+          <SizeRangeSlider
+            minSize={filters.minSize}
+            maxSize={filters.maxSize}
+            onChange={({ minSize, maxSize }) => updateFilters({ minSize, maxSize })}
+          />
         </div>
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">
           <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">Date Modified</p>

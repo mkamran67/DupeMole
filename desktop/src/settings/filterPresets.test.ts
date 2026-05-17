@@ -3,7 +3,6 @@ import {
   buildExtensionAllowlist,
   deriveActiveTypeIds,
   mergePresets,
-  sizePresetLabel,
   datePresetLabel,
   datePresetToAfterMs,
   FILTER_TYPE_PRESETS,
@@ -151,25 +150,6 @@ describe('buildExtensionAllowlist with custom presets', () => {
     const merged = mergePresets([{ id: 'logs', label: 'Logs', formats: ['log'] }]);
     const list = buildExtensionAllowlist(['custom:logs'], '', merged);
     expect(list).toEqual(['log']);
-  });
-});
-
-describe('sizePresetLabel', () => {
-  it('returns "Any" for null inputs', () => {
-    expect(sizePresetLabel(null, null)).toBe('Any');
-    expect(sizePresetLabel()).toBe('Any');
-  });
-
-  it('matches a known preset by min/max', () => {
-    expect(sizePresetLabel(1024 * 1024, 10 * 1024 * 1024)).toBe('1 - 10 MB');
-  });
-
-  it('returns "Any" for non-matching custom range', () => {
-    expect(sizePresetLabel(123, 456)).toBe('Any');
-  });
-
-  it('matches the unbounded-min preset', () => {
-    expect(sizePresetLabel(undefined, 1024 * 1024 - 1)).toBe('< 1 MB');
   });
 });
 
