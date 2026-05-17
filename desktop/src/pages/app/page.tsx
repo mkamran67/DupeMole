@@ -8,7 +8,10 @@ import AnalysisView from './components/AnalysisView';
 import SettingsView from './components/SettingsView';
 import CompareView from './components/CompareView';
 import AboutView from './components/AboutView';
+import DebugView from './components/DebugView';
 import StatsFooter from './components/StatsFooter';
+import ScanProgressModal from './components/ScanProgressModal';
+import OrganizeProgressModal from './components/OrganizeProgressModal';
 
 export default function AppPage() {
   const [activeTab, setActiveTab] = useState('scan');
@@ -33,6 +36,7 @@ export default function AppPage() {
     { id: 'results', node: <ResultsView onNavigateToScan={handleNavigateToScan} /> },
     { id: 'organize', node: <OrganizeView /> },
     { id: 'analysis', node: <AnalysisView /> },
+    { id: 'debug', node: <DebugView /> },
     { id: 'settings', node: <SettingsView /> },
     { id: 'about', node: <AboutView /> },
   ];
@@ -60,6 +64,8 @@ export default function AppPage() {
           </>
         )}
       </main>
+      <ScanProgressModal />
+      <OrganizeProgressModal />
     </div>
   );
 }

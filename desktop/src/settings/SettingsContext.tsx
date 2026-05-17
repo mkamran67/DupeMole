@@ -24,6 +24,17 @@ export interface AppFilters {
   /** Per-scope override of the global ignoreHidden setting. When undefined,
    *  consumers fall back to settings.ignoreHidden. Analysis defaults to true. */
   ignoreHidden?: boolean;
+  /** Organize-only: when true and a file lacks "date taken" metadata but
+   *  has a parseable date in its filename, write that date into the image
+   *  EXIF before placing it. Unwritable formats (RAW/BMP/GIF/AVIF/SVG)
+   *  get routed to MetadataWriteFailed/ for later retry. Ignored on the
+   *  scan and analysis pages. */
+  writeFilenameDateMetadata?: boolean;
+  /** Organize-only sub-option of writeFilenameDateMetadata: when true,
+   *  skip images that already have a date-taken EXIF tag entirely (leave
+   *  them in source, do not move/copy). Only meaningful when
+   *  writeFilenameDateMetadata is also true. */
+  skipImagesWithExistingDate?: boolean;
 }
 
 export const DEFAULT_FILTERS: AppFilters = {

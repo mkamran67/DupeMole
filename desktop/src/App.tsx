@@ -5,6 +5,8 @@ import i18n from "./i18n";
 import { SettingsProvider } from "./settings/SettingsContext";
 import { ResultsProvider } from "./results/ResultsContext";
 import { StatsProvider } from "./stats/StatsContext";
+import { ScanProvider } from "./scan/ScanContext";
+import { OrganizeProvider } from "./organize/OrganizeContext";
 
 function App() {
   return (
@@ -12,9 +14,13 @@ function App() {
       <SettingsProvider>
         <StatsProvider>
           <ResultsProvider>
-            <BrowserRouter basename={__BASE_PATH__}>
-              <AppRoutes />
-            </BrowserRouter>
+            <ScanProvider>
+              <OrganizeProvider>
+                <BrowserRouter basename={__BASE_PATH__}>
+                  <AppRoutes />
+                </BrowserRouter>
+              </OrganizeProvider>
+            </ScanProvider>
           </ResultsProvider>
         </StatsProvider>
       </SettingsProvider>

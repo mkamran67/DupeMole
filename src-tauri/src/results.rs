@@ -118,7 +118,12 @@ pub fn delete_files(
                 // Batch failed atomically; the crate doesn't tell us which
                 // path tripped it. Fall back to per-file so the user can see
                 // exactly which deletes failed.
-                eprintln!("trash::delete_all failed ({e}); falling back to per-file");
+                crate::debug::log(
+                    &app,
+                    "warn",
+                    "delete",
+                    format!("trash::delete_all failed ({e}); falling back to per-file"),
+                );
                 const EMIT_EVERY: u64 = 32;
                 for (i, path) in paths.iter().enumerate() {
                     let p = Path::new(path);
@@ -150,7 +155,7 @@ pub fn delete_files(
             *s
         };
         if let Err(e) = stats::save(&app, &snapshot) {
-            eprintln!("stats::save failed: {e}");
+            crate::debug::log(&app, "error", "stats", format!("stats::save failed: {e}"));
         }
     }
 

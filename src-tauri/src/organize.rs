@@ -208,9 +208,152 @@ pub struct OrganizeComplete {
     pub overwritten: u64,
     /// User chose Keep Both / Keep Both All — written to a numbered path.
     pub renamed: u64,
+    /// Files for which the parsed filename date was successfully written into
+    /// EXIF (`writeFilenameDate` toggle on).
+    pub metadata_written: u64,
+    /// Files routed to `MetadataWriteFailed/` because the EXIF write could
+    /// not be performed (unsupported container, I/O error, etc).
+    pub metadata_write_failed: u64,
+    /// Images left in source because they already had a date-taken EXIF tag
+    /// and the `skipImagesWithExistingDate` sub-toggle was on.
+    pub skipped_existing_metadata: u64,
     pub errors: Vec<OrganizeError>,
     pub cancelled: bool,
     pub target: String,
+}
+
+/// Folder under the target where files whose EXIF write failed (or could
+/// not be attempted, for unsupported containers) get routed when the
+/// `writeFilenameDate` toggle is on. Lets the user find and retry them.
+pub const METADATA_WRITE_FAILED_DIR: &str = "MetadataWriteFailed";
+
+/// Container formats `little_exif` can write EXIF into. Anything else in
+/// the broader `IMAGE_EXTS` list (RAW family, BMP, GIF, AVIF, SVG, DNG, …)
+/// is treated as unwritable up-front, before any mutation, so we can route
+/// the file to `MetadataWriteFailed/` without first touching it.
+const WRITABLE_IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif", "jxl",
+];
+
+/// Video container formats we can patch a `creation_time` into in place
+/// (ISO BMFF / QuickTime family). Other video extensions in the broader
+/// `VIDEO_EXTS` list (mkv, webm, avi, flv, wmv) use unrelated containers
+/// and route to `MetadataWriteFailed/` up-front.
+const WRITABLE_VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "qt", "3gp", "3g2"];
+
+fn is_writable_image_ext(path: &Path) -> bool {
+    let Some(ext) = ext_lower(path) else { return false };
+    WRITABLE_IMAGE_EXTS.iter().any(|e| *e == ext)
+}
+
+fn is_writable_video_ext(path: &Path) -> bool {
+    let Some(ext) = ext_lower(path) else { return false };
+    WRITABLE_VIDEO_EXTS.iter().any(|e| *e == ext)
+}
+
+/// Walk `root`'s subtree bottom-up and remove every empty directory under
+/// it. `root` itself is never removed, even if it ends up empty.
+/// `std::fs::remove_dir` only succeeds on empty directories, so any subdir
+/// that still contains files (or non-empty subdirs) is left intact.
+/// Best-effort: returns the count of dirs removed; I/O errors on individual
+/// entries are swallowed so a stuck dir doesn't abort the cleanup.
+fn prune_empty_subdirs(root: &Path) -> usize {
+    fn recurse(dir: &Path, removed: &mut usize, is_root: bool) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ft = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            // Don't follow symlinks — removing through one could touch
+            // anything outside the target tree.
+            if ft.is_dir() && !ft.is_symlink() {
+                recurse(&path, removed, false);
+            }
+        }
+        if !is_root && std::fs::remove_dir(dir).is_ok() {
+            *removed += 1;
+        }
+    }
+    let mut removed = 0;
+    if root.is_dir() {
+        recurse(root, &mut removed, true);
+    }
+    removed
+}
+
+/// Dispatch to the right writer for the file's category. Callers should
+/// only reach here for `MetadataWriteIntent::Attempt`, where the category
+/// is guaranteed to be Image or Video.
+fn write_capture_date_for_category(
+    path: &Path,
+    ms: u64,
+    category: crate::media_date::FileCategory,
+) -> crate::metadata_writer::WriteOutcome {
+    use crate::media_date::FileCategory;
+    match category {
+        FileCategory::Image => crate::metadata_writer::write_image_capture_date_ms(path, ms),
+        FileCategory::Video => crate::metadata_writer::write_video_capture_date_ms(path, ms),
+        _ => crate::metadata_writer::WriteOutcome::UnsupportedFormat,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MetadataWriteIntent {
+    /// Toggle off, or file isn't a filename-date-derived image: leave alone.
+    Skip,
+    /// Eligible AND the container is writable: caller should attempt the
+    /// write (before move / after copy).
+    Attempt,
+    /// Eligible BUT the container can't be EXIF-written: caller routes to
+    /// the failure folder without attempting a write.
+    UnsupportedExt,
+}
+
+/// Sub-toggle filter: when the user enables `skipImagesWithExistingDate`
+/// alongside `writeFilenameDate`, images that already have a date-taken EXIF
+/// tag are left in source — not moved, not copied, not counted as organized.
+/// Videos and other non-image categories are unaffected.
+fn should_skip_existing_metadata(
+    write_filename_date: bool,
+    skip_images_with_existing_date: bool,
+    date_src: DateSource,
+    category: crate::media_date::FileCategory,
+) -> bool {
+    write_filename_date
+        && skip_images_with_existing_date
+        && category == crate::media_date::FileCategory::Image
+        && date_src == DateSource::Metadata
+}
+
+fn classify_metadata_write_intent(
+    src: &Path,
+    write_filename_date: bool,
+    date_src: DateSource,
+    category: crate::media_date::FileCategory,
+) -> MetadataWriteIntent {
+    use crate::media_date::FileCategory;
+    if !write_filename_date || date_src != DateSource::Filename {
+        return MetadataWriteIntent::Skip;
+    }
+    match category {
+        FileCategory::Image => {
+            if is_writable_image_ext(src) {
+                MetadataWriteIntent::Attempt
+            } else {
+                MetadataWriteIntent::UnsupportedExt
+            }
+        }
+        FileCategory::Video => {
+            if is_writable_video_ext(src) {
+                MetadataWriteIntent::Attempt
+            } else {
+                MetadataWriteIntent::UnsupportedExt
+            }
+        }
+        _ => MetadataWriteIntent::Skip,
+    }
 }
 
 const MONTH_NAMES: [&str; 12] = [
@@ -219,7 +362,7 @@ const MONTH_NAMES: [&str; 12] = [
 ];
 
 /// Inverse of civil_to_unix_ms. Returns (year, month [1..=12], day [1..=31]).
-fn unix_ms_to_civil(ms: u64) -> (i32, u32, u32) {
+pub fn unix_ms_to_civil(ms: u64) -> (i32, u32, u32) {
     // days since unix epoch (1970-01-01)
     let secs = (ms / 1000) as i64;
     let mut days = secs.div_euclid(86_400);
@@ -275,6 +418,22 @@ fn ext_lower(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase())
+}
+
+/// True when `size` falls within the inclusive [min, max] window.
+/// `None` on either bound means "no bound on that side".
+fn passes_size_window(size: u64, min: Option<u64>, max: Option<u64>) -> bool {
+    if let Some(m) = min {
+        if size < m {
+            return false;
+        }
+    }
+    if let Some(m) = max {
+        if size > m {
+            return false;
+        }
+    }
+    true
 }
 
 fn extension_allowed(path: &Path, allow: &Option<Vec<String>>) -> bool {
@@ -471,7 +630,10 @@ pub fn start_organize(
     granularity: Granularity,
     extensions: Option<Vec<String>>,
     min_size: Option<u64>,
+    max_size: Option<u64>,
     ignore_macos_files: Option<bool>,
+    write_filename_date: Option<bool>,
+    skip_images_with_existing_date: Option<bool>,
     app: AppHandle,
     organizes: State<ActiveOrganizes>,
 ) -> Result<String, String> {
@@ -502,7 +664,10 @@ pub fn start_organize(
     let collision_thread = collision_state.clone();
     let source_paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
     let ignore_macos = ignore_macos_files.unwrap_or(false);
-    let min_size_bytes = min_size.unwrap_or(0);
+    let min_size_opt = min_size;
+    let max_size_opt = max_size;
+    let write_filename_date = write_filename_date.unwrap_or(false);
+    let skip_images_with_existing_date = skip_images_with_existing_date.unwrap_or(false);
 
     std::thread::spawn(move || {
         let emit_progress = |p: OrganizeProgress| {
@@ -557,9 +722,9 @@ pub fn start_organize(
                         }
                     }
                 }
-                if min_size_bytes > 0 {
+                if min_size_opt.is_some() || max_size_opt.is_some() {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    if size < min_size_bytes {
+                    if !passes_size_window(size, min_size_opt, max_size_opt) {
                         continue;
                     }
                 }
@@ -596,6 +761,9 @@ pub fn start_organize(
         let skipped_by_user = AtomicU64::new(0);
         let overwritten = AtomicU64::new(0);
         let renamed = AtomicU64::new(0);
+        let metadata_written = AtomicU64::new(0);
+        let metadata_write_failed = AtomicU64::new(0);
+        let skipped_existing_metadata = AtomicU64::new(0);
         let errors = Mutex::new(Vec::<OrganizeError>::new());
 
         if !cancelled_during_walk {
@@ -614,7 +782,62 @@ pub fn start_organize(
                 let (ms, date_src) = resolved_date(src);
                 let category = crate::media_date::file_category(src);
                 let unknown_sub = crate::media_date::unknown_subfolder_name(src);
-                let dir = build_subdir(&target_path, ms, category, date_src, &granularity, &unknown_sub);
+
+                // Sub-toggle: leave images that already have a date-taken
+                // EXIF tag in source. They are not organized, not counted as
+                // processed via copied/moved, just tallied separately.
+                if should_skip_existing_metadata(
+                    write_filename_date,
+                    skip_images_with_existing_date,
+                    date_src,
+                    category,
+                ) {
+                    skipped_existing_metadata.fetch_add(1, Ordering::Relaxed);
+                    emit_organizing_progress(&app_handle, &id_thread, &processed, total, src);
+                    return;
+                }
+
+                let intent = classify_metadata_write_intent(
+                    src,
+                    write_filename_date,
+                    date_src,
+                    category,
+                );
+
+                // For Move + Attempt, write EXIF on src up-front — we're
+                // about to consume it anyway. For Copy + Attempt, defer
+                // until *after* the copy so we never mutate the source.
+                // For UnsupportedExt, route to the failure folder without
+                // touching the file.
+                let mut metadata_outcome: Option<crate::metadata_writer::WriteOutcome> = None;
+                let mut route_to_failed = false;
+                match intent {
+                    MetadataWriteIntent::Skip => {}
+                    MetadataWriteIntent::UnsupportedExt => {
+                        metadata_outcome = Some(
+                            crate::metadata_writer::WriteOutcome::UnsupportedFormat,
+                        );
+                        route_to_failed = true;
+                    }
+                    MetadataWriteIntent::Attempt => match op {
+                        OrganizeOp::Move => {
+                            let r = write_capture_date_for_category(src, ms, category);
+                            if !matches!(r, crate::metadata_writer::WriteOutcome::Written) {
+                                route_to_failed = true;
+                            }
+                            metadata_outcome = Some(r);
+                        }
+                        OrganizeOp::Copy => {
+                            // defer write to post-copy
+                        }
+                    },
+                }
+
+                let dir = if route_to_failed {
+                    target_path.join(METADATA_WRITE_FAILED_DIR)
+                } else {
+                    build_subdir(&target_path, ms, category, date_src, &granularity, &unknown_sub)
+                };
                 if let Err(e) = std::fs::create_dir_all(&dir) {
                     errors.lock().unwrap().push(OrganizeError {
                         path: src.display().to_string(),
@@ -710,22 +933,59 @@ pub fn start_organize(
                 };
 
                 match result {
-                    Ok(()) => match kind {
-                        ResolutionKind::Overwrite => {
-                            overwritten.fetch_add(1, Ordering::Relaxed);
-                        }
-                        ResolutionKind::Renamed => {
-                            renamed.fetch_add(1, Ordering::Relaxed);
-                        }
-                        ResolutionKind::Normal => match op {
-                            OrganizeOp::Copy => {
-                                copied.fetch_add(1, Ordering::Relaxed);
+                    Ok(()) => {
+                        match kind {
+                            ResolutionKind::Overwrite => {
+                                overwritten.fetch_add(1, Ordering::Relaxed);
                             }
-                            OrganizeOp::Move => {
-                                moved.fetch_add(1, Ordering::Relaxed);
+                            ResolutionKind::Renamed => {
+                                renamed.fetch_add(1, Ordering::Relaxed);
                             }
-                        },
-                    },
+                            ResolutionKind::Normal => match op {
+                                OrganizeOp::Copy => {
+                                    copied.fetch_add(1, Ordering::Relaxed);
+                                }
+                                OrganizeOp::Move => {
+                                    moved.fetch_add(1, Ordering::Relaxed);
+                                }
+                            },
+                        }
+
+                        // Deferred Copy-mode EXIF write: do it now on the
+                        // destination (we promised never to mutate the
+                        // source for Copy). Skip if we already routed to
+                        // the failure folder up-front.
+                        if matches!(intent, MetadataWriteIntent::Attempt)
+                            && matches!(op, OrganizeOp::Copy)
+                            && !route_to_failed
+                        {
+                            metadata_outcome = Some(
+                                write_capture_date_for_category(&dest, ms, category),
+                            );
+                        }
+
+                        if let Some(outcome) = metadata_outcome.take() {
+                            match outcome {
+                                crate::metadata_writer::WriteOutcome::Written => {
+                                    metadata_written.fetch_add(1, Ordering::Relaxed);
+                                }
+                                crate::metadata_writer::WriteOutcome::UnsupportedFormat => {
+                                    metadata_write_failed.fetch_add(1, Ordering::Relaxed);
+                                    errors.lock().unwrap().push(OrganizeError {
+                                        path: src.display().to_string(),
+                                        reason: "metadata write: unsupported format".to_string(),
+                                    });
+                                }
+                                crate::metadata_writer::WriteOutcome::Failed(msg) => {
+                                    metadata_write_failed.fetch_add(1, Ordering::Relaxed);
+                                    errors.lock().unwrap().push(OrganizeError {
+                                        path: src.display().to_string(),
+                                        reason: format!("metadata write: {msg}"),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     Err(e) => errors.lock().unwrap().push(OrganizeError {
                         path: src.display().to_string(),
                         reason: e.to_string(),
@@ -737,6 +997,14 @@ pub fn start_organize(
         }
 
         let was_cancelled = cancel.0.load(Ordering::SeqCst);
+
+        // Remove any empty subdirectories under target_path. The per-file
+        // worker pre-creates dated subdirs before resolving collisions, so
+        // Skip/Cancel/copy-error paths can leave an empty leaf behind. A
+        // bottom-up sweep cleans every empty dir without touching ones that
+        // have files in them. Best-effort: errors are silently ignored.
+        let _ = prune_empty_subdirs(&target_path);
+
         let complete = OrganizeComplete {
             processed: processed.load(Ordering::Relaxed),
             copied: copied.load(Ordering::Relaxed),
@@ -745,6 +1013,9 @@ pub fn start_organize(
             skipped_by_user: skipped_by_user.load(Ordering::Relaxed),
             overwritten: overwritten.load(Ordering::Relaxed),
             renamed: renamed.load(Ordering::Relaxed),
+            metadata_written: metadata_written.load(Ordering::Relaxed),
+            metadata_write_failed: metadata_write_failed.load(Ordering::Relaxed),
+            skipped_existing_metadata: skipped_existing_metadata.load(Ordering::Relaxed),
             errors: errors.into_inner().unwrap(),
             cancelled: was_cancelled,
             target: target_path.display().to_string(),
@@ -892,6 +1163,74 @@ mod tests {
     }
 
     #[test]
+    fn skip_existing_metadata_only_when_all_three_conditions_hold() {
+        // Happy path: all three conditions satisfied → skip.
+        assert!(should_skip_existing_metadata(
+            true,
+            true,
+            DateSource::Metadata,
+            FileCategory::Image,
+        ));
+    }
+
+    #[test]
+    fn skip_existing_metadata_off_when_sub_toggle_off() {
+        assert!(!should_skip_existing_metadata(
+            true,
+            false,
+            DateSource::Metadata,
+            FileCategory::Image,
+        ));
+    }
+
+    #[test]
+    fn skip_existing_metadata_off_when_parent_toggle_off() {
+        // Sub-toggle is meaningless without the parent toggle.
+        assert!(!should_skip_existing_metadata(
+            false,
+            true,
+            DateSource::Metadata,
+            FileCategory::Image,
+        ));
+    }
+
+    #[test]
+    fn skip_existing_metadata_off_for_filename_or_fallback_date() {
+        // No existing EXIF date → don't skip; the whole point is to process these.
+        assert!(!should_skip_existing_metadata(
+            true,
+            true,
+            DateSource::Filename,
+            FileCategory::Image,
+        ));
+        assert!(!should_skip_existing_metadata(
+            true,
+            true,
+            DateSource::Fallback,
+            FileCategory::Image,
+        ));
+    }
+
+    #[test]
+    fn skip_existing_metadata_off_for_non_images() {
+        // Videos with QuickTime metadata are still organized; sub-toggle is images-only.
+        for cat in [
+            FileCategory::Video,
+            FileCategory::Audio,
+            FileCategory::Pdf,
+            FileCategory::Doc,
+            FileCategory::Archive,
+            FileCategory::Unknown,
+        ] {
+            assert!(
+                !should_skip_existing_metadata(true, true, DateSource::Metadata, cat),
+                "expected non-image category {:?} not to be skipped",
+                cat,
+            );
+        }
+    }
+
+    #[test]
     fn build_subdir_unknown_uses_subfolder_name() {
         let target = PathBuf::from("/t");
         let g = Granularity { year: true, month: true, day: true };
@@ -990,6 +1329,33 @@ mod tests {
         let (_ms, src) = resolved_date(&path);
         assert_eq!(src, DateSource::Filename);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn passes_size_window_no_bounds_accepts_anything() {
+        assert!(passes_size_window(0, None, None));
+        assert!(passes_size_window(u64::MAX, None, None));
+    }
+
+    #[test]
+    fn passes_size_window_rejects_below_min() {
+        assert!(!passes_size_window(99, Some(100), None));
+        assert!(passes_size_window(100, Some(100), None)); // boundary inclusive
+        assert!(passes_size_window(101, Some(100), None));
+    }
+
+    #[test]
+    fn passes_size_window_rejects_above_max() {
+        assert!(passes_size_window(99, None, Some(100)));
+        assert!(passes_size_window(100, None, Some(100))); // boundary inclusive
+        assert!(!passes_size_window(101, None, Some(100)));
+    }
+
+    #[test]
+    fn passes_size_window_with_both_bounds_filters_outside() {
+        assert!(!passes_size_window(50, Some(100), Some(200)));
+        assert!(passes_size_window(150, Some(100), Some(200)));
+        assert!(!passes_size_window(250, Some(100), Some(200)));
     }
 
     #[test]
@@ -1306,5 +1672,313 @@ mod tests {
         move_file(&src, &dest).unwrap();
         assert!(!src.exists());
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    // ── Metadata-write intent classification ─────────────────────────────
+
+    #[test]
+    fn is_writable_image_ext_accepts_jpeg_png_tiff_webp_heif_jxl() {
+        for p in ["a.jpg", "a.JPEG", "a.png", "a.tif", "a.tiff", "a.webp", "a.heic", "a.HEIF", "a.jxl"] {
+            assert!(is_writable_image_ext(Path::new(p)), "should accept {p}");
+        }
+    }
+
+    #[test]
+    fn is_writable_image_ext_rejects_other_image_exts() {
+        for p in ["a.bmp", "a.gif", "a.svg", "a.avif", "a.dng", "a.cr2", "a.arw", "a.raw"] {
+            assert!(!is_writable_image_ext(Path::new(p)), "should reject {p}");
+        }
+    }
+
+    #[test]
+    fn classify_skip_when_toggle_off() {
+        let p = Path::new("/x/2025-02-11.jpg");
+        assert_eq!(
+            classify_metadata_write_intent(p, false, DateSource::Filename, crate::media_date::FileCategory::Image),
+            MetadataWriteIntent::Skip,
+        );
+    }
+
+    #[test]
+    fn classify_skip_when_date_already_in_metadata() {
+        let p = Path::new("/x/2025-02-11.jpg");
+        assert_eq!(
+            classify_metadata_write_intent(p, true, DateSource::Metadata, crate::media_date::FileCategory::Image),
+            MetadataWriteIntent::Skip,
+        );
+    }
+
+    #[test]
+    fn classify_skip_when_no_filename_date_fallback() {
+        let p = Path::new("/x/vacation.jpg");
+        assert_eq!(
+            classify_metadata_write_intent(p, true, DateSource::Fallback, crate::media_date::FileCategory::Image),
+            MetadataWriteIntent::Skip,
+        );
+    }
+
+    #[test]
+    fn classify_skip_when_not_an_image_or_video() {
+        let p = Path::new("/x/2025-02-11.pdf");
+        assert_eq!(
+            classify_metadata_write_intent(p, true, DateSource::Filename, crate::media_date::FileCategory::Pdf),
+            MetadataWriteIntent::Skip,
+        );
+    }
+
+    #[test]
+    fn classify_attempt_for_writable_video_with_filename_date() {
+        for p in ["/x/2025-02-11.mp4", "/x/2025-02-11.mov", "/x/2025-02-11.qt"] {
+            assert_eq!(
+                classify_metadata_write_intent(Path::new(p), true, DateSource::Filename, crate::media_date::FileCategory::Video),
+                MetadataWriteIntent::Attempt,
+                "expected Attempt for {p}",
+            );
+        }
+    }
+
+    #[test]
+    fn classify_unsupported_ext_for_mkv_with_filename_date() {
+        for p in ["/x/2025-02-11.mkv", "/x/2025-02-11.webm", "/x/2025-02-11.avi"] {
+            assert_eq!(
+                classify_metadata_write_intent(Path::new(p), true, DateSource::Filename, crate::media_date::FileCategory::Video),
+                MetadataWriteIntent::UnsupportedExt,
+                "expected UnsupportedExt for {p}",
+            );
+        }
+    }
+
+    #[test]
+    fn classify_attempt_for_writable_image_with_filename_date() {
+        let p = Path::new("/x/2025-02-11.jpg");
+        assert_eq!(
+            classify_metadata_write_intent(p, true, DateSource::Filename, crate::media_date::FileCategory::Image),
+            MetadataWriteIntent::Attempt,
+        );
+    }
+
+    #[test]
+    fn classify_unsupported_ext_for_raw_with_filename_date() {
+        let p = Path::new("/x/2025-02-11.dng");
+        assert_eq!(
+            classify_metadata_write_intent(p, true, DateSource::Filename, crate::media_date::FileCategory::Image),
+            MetadataWriteIntent::UnsupportedExt,
+        );
+    }
+
+    // ── End-to-end integration of the metadata-write step ────────────────
+    //
+    // These bypass the Tauri command shell (which needs an AppHandle to
+    // emit events) and exercise the metadata-write logic via the public
+    // helpers directly. They mirror the par_iter block in `start_organize`
+    // tightly enough to catch regressions in routing & counter semantics.
+
+    fn write_blank_jpeg(path: &Path) {
+        use image::RgbImage;
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        RgbImage::new(2, 2).save(path).unwrap();
+    }
+
+    #[test]
+    fn metadata_write_copy_succeeds_writes_dest_leaves_source_pristine() {
+        let dir = tempdir();
+        let src = dir.join("src/2025-02-11.jpg");
+        write_blank_jpeg(&src);
+        let src_bytes_before = std::fs::read(&src).unwrap();
+
+        // Simulate Copy mode: copy to dated subdir, then write EXIF on dest.
+        let (ms, date_src) = resolved_date(&src);
+        let category = crate::media_date::file_category(&src);
+        assert_eq!(date_src, DateSource::Filename);
+        assert_eq!(category, crate::media_date::FileCategory::Image);
+
+        let intent = classify_metadata_write_intent(&src, true, date_src, category);
+        assert_eq!(intent, MetadataWriteIntent::Attempt);
+
+        let target = dir.clone();
+        let g = Granularity { year: true, month: true, day: false };
+        let dest_dir = build_subdir(&target, ms, category, date_src, &g, "");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("2025-02-11.jpg");
+        std::fs::copy(&src, &dest).unwrap();
+        let outcome = crate::metadata_writer::write_image_capture_date_ms(&dest, ms);
+        assert_eq!(outcome, crate::metadata_writer::WriteOutcome::Written);
+
+        // Source untouched
+        assert_eq!(std::fs::read(&src).unwrap(), src_bytes_before);
+        // Dest has EXIF now
+        assert_eq!(
+            crate::media_date::read_metadata_ms(&dest),
+            Some(ms),
+            "destination should have EXIF capture date matching parsed ms"
+        );
+    }
+
+    #[test]
+    fn metadata_write_unsupported_ext_routes_to_failed_folder() {
+        let dir = tempdir();
+        let src = dir.join("src/2025-02-11.dng");
+        write_file(&src, b"not a real dng but extension is enough");
+
+        let (ms, date_src) = resolved_date(&src);
+        let category = crate::media_date::file_category(&src);
+        assert_eq!(date_src, DateSource::Filename);
+        // .dng is an image extension per media_date::IMAGE_EXTS
+        assert_eq!(category, crate::media_date::FileCategory::Image);
+
+        let intent = classify_metadata_write_intent(&src, true, date_src, category);
+        assert_eq!(intent, MetadataWriteIntent::UnsupportedExt);
+
+        // Route override: failure folder, not the dated subdir
+        let target = dir.clone();
+        let g = Granularity { year: true, month: true, day: false };
+        let unknown_sub = crate::media_date::unknown_subfolder_name(&src);
+        let dated_dir = build_subdir(&target, ms, category, date_src, &g, &unknown_sub);
+        let failed_dir = target.join(METADATA_WRITE_FAILED_DIR);
+        assert_ne!(dated_dir, failed_dir);
+        // Sanity: the dated path would have been under Images/2025/...
+        assert!(dated_dir.to_string_lossy().contains("Images"));
+    }
+
+    #[test]
+    fn metadata_write_move_mutates_source_then_moves() {
+        // For Move mode, the source is already condemned, so we write
+        // EXIF on the source before the rename. Verify a writable image
+        // gets its EXIF populated by the writer.
+        let dir = tempdir();
+        let src = dir.join("src/2025-02-11.jpg");
+        write_blank_jpeg(&src);
+
+        let (ms, _) = resolved_date(&src);
+        let outcome = crate::metadata_writer::write_image_capture_date_ms(&src, ms);
+        assert_eq!(outcome, crate::metadata_writer::WriteOutcome::Written);
+        assert_eq!(crate::media_date::read_metadata_ms(&src), Some(ms));
+
+        // Now the move itself
+        let dest_dir = dir.join("Images/2025/02-February");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("2025-02-11.jpg");
+        move_file(&src, &dest).unwrap();
+        assert!(!src.exists());
+        assert_eq!(crate::media_date::read_metadata_ms(&dest), Some(ms));
+    }
+
+    #[test]
+    fn prune_empty_subdirs_removes_a_lone_empty_dir() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("Images/2025/02-February")).unwrap();
+        let removed = prune_empty_subdirs(&dir);
+        assert_eq!(removed, 3, "should remove 02-February, 2025, Images");
+        assert!(dir.exists(), "root must never be removed");
+        assert!(!dir.join("Images").exists());
+    }
+
+    #[test]
+    fn prune_empty_subdirs_keeps_dirs_with_files() {
+        let dir = tempdir();
+        let kept = dir.join("Images/2025/02-February");
+        std::fs::create_dir_all(&kept).unwrap();
+        write_file(&kept.join("photo.jpg"), b"x");
+        // Sibling that's empty
+        std::fs::create_dir_all(dir.join("Images/2025/03-March")).unwrap();
+
+        let removed = prune_empty_subdirs(&dir);
+        assert_eq!(removed, 1, "only 03-March should be removed");
+        assert!(kept.join("photo.jpg").exists(), "file must survive");
+        assert!(kept.exists());
+        assert!(!dir.join("Images/2025/03-March").exists());
+    }
+
+    #[test]
+    fn prune_empty_subdirs_never_removes_root_even_if_empty() {
+        let dir = tempdir();
+        let removed = prune_empty_subdirs(&dir);
+        assert_eq!(removed, 0);
+        assert!(dir.exists(), "root must remain even when empty");
+    }
+
+    #[test]
+    fn prune_empty_subdirs_handles_missing_root() {
+        // Should not panic on a path that doesn't exist.
+        let missing = std::path::PathBuf::from("/nonexistent/definitely/missing");
+        assert_eq!(prune_empty_subdirs(&missing), 0);
+    }
+
+    #[test]
+    fn prune_empty_subdirs_removes_deeply_nested_empties_while_preserving_useful_branch() {
+        let dir = tempdir();
+        // Useful branch: Videos/2024/12-December/clip.mov
+        let video_dir = dir.join("Videos/2024/12-December");
+        std::fs::create_dir_all(&video_dir).unwrap();
+        write_file(&video_dir.join("clip.mov"), b"x");
+        // Empty branch alongside, several levels deep
+        std::fs::create_dir_all(dir.join("Videos/Unknown")).unwrap();
+        std::fs::create_dir_all(dir.join("Images/2025/02-February")).unwrap();
+        std::fs::create_dir_all(dir.join("MetadataWriteFailed")).unwrap();
+
+        prune_empty_subdirs(&dir);
+
+        assert!(video_dir.join("clip.mov").exists());
+        assert!(video_dir.exists());
+        assert!(dir.join("Videos/2024").exists());
+        assert!(dir.join("Videos").exists());
+        assert!(!dir.join("Videos/Unknown").exists());
+        assert!(!dir.join("Images").exists());
+        assert!(!dir.join("MetadataWriteFailed").exists());
+    }
+
+    #[test]
+    fn metadata_write_video_copy_succeeds_writes_dest_leaves_source_pristine() {
+        // Mirror of the image Copy-mode test for video. Uses a minimal MP4
+        // (moov→mvhd) under a .qt name to confirm both QuickTime ext and
+        // the dispatch helper work end-to-end.
+        let dir = tempdir();
+        let src = dir.join("src/2025-02-11.qt");
+        if let Some(p) = src.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        // Initial creation_time = 0 (epoch-1904); the writer will replace it.
+        std::fs::write(
+            &src,
+            crate::media_date::tests::build_minimal_mp4_v0(0),
+        )
+        .unwrap();
+        let src_bytes_before = std::fs::read(&src).unwrap();
+
+        let (ms, date_src) = resolved_date(&src);
+        let category = crate::media_date::file_category(&src);
+        assert_eq!(date_src, DateSource::Filename);
+        assert_eq!(category, crate::media_date::FileCategory::Video);
+
+        let intent = classify_metadata_write_intent(&src, true, date_src, category);
+        assert_eq!(intent, MetadataWriteIntent::Attempt);
+
+        let target = dir.clone();
+        let g = Granularity { year: true, month: true, day: false };
+        let dest_dir = build_subdir(&target, ms, category, date_src, &g, "");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("2025-02-11.qt");
+        std::fs::copy(&src, &dest).unwrap();
+        let outcome = write_capture_date_for_category(&dest, ms, category);
+        assert_eq!(outcome, crate::metadata_writer::WriteOutcome::Written);
+
+        assert_eq!(std::fs::read(&src).unwrap(), src_bytes_before);
+        assert_eq!(crate::media_date::read_metadata_ms(&dest), Some(ms));
+    }
+
+    #[test]
+    fn metadata_write_mkv_video_routes_to_failed_folder() {
+        let dir = tempdir();
+        let src = dir.join("src/2025-02-11.mkv");
+        write_file(&src, b"not a real mkv");
+
+        let (_ms, date_src) = resolved_date(&src);
+        let category = crate::media_date::file_category(&src);
+        assert_eq!(date_src, DateSource::Filename);
+        assert_eq!(category, crate::media_date::FileCategory::Video);
+        let intent = classify_metadata_write_intent(&src, true, date_src, category);
+        assert_eq!(intent, MetadataWriteIntent::UnsupportedExt);
     }
 }

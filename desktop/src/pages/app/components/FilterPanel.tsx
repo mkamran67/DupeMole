@@ -1,5 +1,6 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { isMacos, useSettings, type AppFilters } from '../../../settings/SettingsContext';
+import SizeRangeSlider from './SizeRangeSlider';
 import {
   SIZE_PRESETS,
   DATE_PRESETS,
@@ -110,30 +111,6 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
   const [newType, setNewType] = useState('');
 
   const showMacosToggle = useMemo(() => isMacos(), []);
-
-  const initialMinUnit: 'KB' | 'MB' = useMemo(() => {
-    const n = filters.minSize;
-    if (n && n >= 1024 * 1024 && n % (1024 * 1024) === 0) return 'MB';
-    return 'KB';
-  }, [filters.minSize]);
-  const [minSizeUnit, setMinSizeUnit] = useState<'KB' | 'MB'>(initialMinUnit);
-  const minSizeInputValue = useMemo(() => {
-    if (filters.minSize == null) return '';
-    const div = minSizeUnit === 'MB' ? 1024 * 1024 : 1024;
-    const v = filters.minSize / div;
-    return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  }, [filters.minSize, minSizeUnit]);
-
-  const onMinSizeInputChange = (raw: string) => {
-    if (raw.trim() === '') {
-      updateFilters({ minSize: null });
-      return;
-    }
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) return;
-    const mult = minSizeUnit === 'MB' ? 1024 * 1024 : 1024;
-    updateFilters({ minSize: Math.round(n * mult) });
-  };
 
   const writeAllowlist = (typeIds: string[], custom: string) => {
     const list = buildExtensionAllowlist(typeIds, custom, filterTypes);
@@ -550,39 +527,12 @@ export default function FilterPanel({ kind, title, subtitle }: FilterPanelProps)
             ))}
           </div>
           <div className="mt-4 pt-4 border-t border-white/5">
-            <p className="text-white/40 text-[11px] font-medium mb-2">Minimum Size</p>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                step="any"
-                inputMode="decimal"
-                placeholder="None"
-                value={minSizeInputValue}
-                onChange={(e) => onMinSizeInputChange(e.target.value)}
-                className="flex-1 min-w-0 text-sm px-3 py-2 rounded-lg border border-white/10 bg-white/5 text-white placeholder-white/30 focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200"
-              />
-              <div className="relative">
-                <select
-                  value={minSizeUnit}
-                  onChange={(e) => setMinSizeUnit(e.target.value as 'KB' | 'MB')}
-                  className="text-sm pl-3 pr-8 py-2 rounded-lg border border-white/10 bg-white/5 text-white focus:outline-none focus:border-[#f5c542]/40 transition-colors duration-200 cursor-pointer appearance-none"
-                >
-                  <option value="KB" className="bg-[#3d2418]">KB</option>
-                  <option value="MB" className="bg-[#3d2418]">MB</option>
-                </select>
-                <i className="ri-arrow-down-s-line absolute right-2 top-1/2 -translate-y-1/2 text-white/30 text-sm pointer-events-none"></i>
-              </div>
-              {filters.minSize != null && (
-                <button
-                  onClick={() => updateFilters({ minSize: null })}
-                  className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white/40 hover:text-white/60 transition-colors duration-200 cursor-pointer"
-                  title="Clear minimum size"
-                >
-                  <i className="ri-close-line text-xs"></i>
-                </button>
-              )}
-            </div>
+            <p className="text-white/40 text-[11px] font-medium mb-3">Size Range</p>
+            <SizeRangeSlider
+              minSize={filters.minSize}
+              maxSize={filters.maxSize}
+              onChange={({ minSize, maxSize }) => updateFilters({ minSize, maxSize })}
+            />
           </div>
         </div>
         <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5">

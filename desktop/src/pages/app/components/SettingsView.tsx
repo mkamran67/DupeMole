@@ -39,14 +39,6 @@ const settings: SettingItem[] = ([
     default: true,
   },
   {
-    id: 'ignore-hidden',
-    icon: 'ri-eye-off-line',
-    title: 'Ignore Hidden Files',
-    description: 'Skip files starting with a dot during scan',
-    type: 'toggle',
-    default: false,
-  },
-  {
     id: 'auto-scan',
     icon: 'ri-refresh-line',
     title: 'Auto Scan on Launch',
@@ -77,7 +69,6 @@ const idToKey: Record<string, keyof AppSettings> = {
   'confirm-delete': 'confirmDelete',
   'scan-threads': 'scanThreads',
   'notifications': 'notifications',
-  'ignore-hidden': 'ignoreHidden',
   'auto-scan': 'autoScan',
   'minimize-tray': 'minimizeTray',
   'language': 'language',

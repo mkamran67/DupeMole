@@ -9,6 +9,20 @@ import {
   FILTER_TYPE_PRESETS,
 } from './filterPresets';
 
+describe('videos preset', () => {
+  it('includes QT for QuickTime files', () => {
+    const videos = FILTER_TYPE_PRESETS.find((p) => p.id === 'videos')!;
+    expect(videos.formats.map((f) => f.toUpperCase())).toContain('QT');
+  });
+
+  it('includes 3GP / 3G2 for mobile-recorded videos', () => {
+    const videos = FILTER_TYPE_PRESETS.find((p) => p.id === 'videos')!;
+    const formats = videos.formats.map((f) => f.toUpperCase());
+    expect(formats).toContain('3GP');
+    expect(formats).toContain('3G2');
+  });
+});
+
 describe('buildExtensionAllowlist', () => {
   it('returns null when no presets and no custom extensions', () => {
     expect(buildExtensionAllowlist([], '')).toBeNull();

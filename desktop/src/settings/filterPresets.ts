@@ -21,7 +21,7 @@ export const FILTER_TYPE_PRESETS: FilterTypePreset[] = [
     id: 'videos',
     icon: 'ri-video-line',
     label: 'Videos',
-    formats: ['MP4', 'MOV', 'MKV', 'AVI', 'WEBM', 'FLV', 'WMV', 'M4V'],
+    formats: ['MP4', 'MOV', 'QT', 'M4V', '3GP', '3G2', 'MKV', 'AVI', 'WEBM', 'FLV', 'WMV'],
   },
   {
     id: 'pdfs',

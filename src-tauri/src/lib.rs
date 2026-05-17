@@ -1,6 +1,8 @@
 mod analysis;
 mod cli_paths;
+mod debug;
 mod media_date;
+mod metadata_writer;
 mod organize;
 mod results;
 mod scanner;
@@ -100,7 +102,12 @@ fn start_scan(
             let id = scan_id_thread.clone();
             move |snapshot: &ScanComplete| {
                 if let Err(e) = results::save_last_scan(&app, snapshot) {
-                    eprintln!("save_last_scan (checkpoint) failed: {e}");
+                    debug::log(
+                        &app,
+                        "error",
+                        "scan",
+                        format!("save_last_scan (checkpoint) failed: {e}"),
+                    );
                     return;
                 }
                 let _ = app.emit(
@@ -121,7 +128,12 @@ fn start_scan(
         let was_cancelled = cancel.0.load(std::sync::atomic::Ordering::SeqCst);
 
         if let Err(e) = results::save_last_scan(&app_handle, &result) {
-            eprintln!("save_last_scan failed: {e}");
+            debug::log(
+                &app_handle,
+                "error",
+                "scan",
+                format!("save_last_scan failed: {e}"),
+            );
         }
 
         if !was_cancelled {
@@ -132,7 +144,12 @@ fn start_scan(
                     *s
                 };
                 if let Err(e) = stats::save(&app_handle, &snapshot) {
-                    eprintln!("stats::save failed: {e}");
+                    debug::log(
+                        &app_handle,
+                        "error",
+                        "stats",
+                        format!("stats::save failed: {e}"),
+                    );
                 }
             }
         }
@@ -244,6 +261,7 @@ pub fn run() {
             app.manage(ActiveScans::default());
             app.manage(ActiveAnalyses::default());
             app.manage(organize::ActiveOrganizes::default());
+            app.manage(debug::LogState::default());
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             let cli = cli_paths::parse_paths(std::env::args(), &cwd);
             app.manage(CliPaths(cli));
@@ -264,7 +282,11 @@ pub fn run() {
             results::get_last_scan,
             results::delete_files,
             results::prune_last_scan,
-            thumbnails::get_thumbnail
+            thumbnails::get_thumbnail,
+            debug::get_logs,
+            debug::clear_logs,
+            debug::push_log,
+            debug::parse_filename_date_test
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,8 +1,7 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useSettings } from '../../../settings/SettingsContext';
+import { useOrganize, type OrganizeCompleteResult } from '../../../organize/OrganizeContext';
 import {
   buildExtensionAllowlist,
   deriveActiveTypeIds,
@@ -17,34 +16,6 @@ interface SourceDir {
   id: number;
   name: string;
   path: string;
-}
-
-type Phase = 'walking' | 'organizing';
-
-interface OrganizeProgressEvent {
-  organizeId: string;
-  progress: {
-    processed: number;
-    total: number;
-    currentPath: string | null;
-    phase: Phase;
-  };
-}
-
-interface OrganizeCompleteEvent {
-  organizeId: string;
-  result: {
-    processed: number;
-    copied: number;
-    moved: number;
-    skippedIdentical: number;
-    skippedByUser: number;
-    overwritten: number;
-    renamed: number;
-    errors: { path: string; reason: string }[];
-    cancelled: boolean;
-    target: string;
-  };
 }
 
 function buildPreview(year: boolean, month: boolean, day: boolean): string {
@@ -85,15 +56,15 @@ export default function OrganizeView() {
   const [showFilters, setShowFilters] = useState(false);
   const [customTypeModalOpen, setCustomTypeModalOpen] = useState(false);
 
-  const [running, setRunning] = useState(false);
-  const [phase, setPhase] = useState<Phase | null>(null);
-  const [processed, setProcessed] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [currentPath, setCurrentPath] = useState<string | null>(null);
-  const [completion, setCompletion] = useState<OrganizeCompleteEvent['result'] | null>(null);
+  const {
+    running,
+    startOrganize: ctxStartOrganize,
+    cancelOrganize: ctxCancelOrganize,
+    onComplete,
+    onCollision,
+  } = useOrganize();
+  const [completion, setCompletion] = useState<OrganizeCompleteResult | null>(null);
   const [collision, setCollision] = useState<CollisionEvent | null>(null);
-
-  const activeId = useRef<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
   // disable month/day if year unchecked
@@ -175,91 +146,39 @@ export default function OrganizeView() {
       );
       if (!confirmed) return;
     }
-
-    setRunning(true);
-    setPhase('walking');
-    setProcessed(0);
-    setTotal(0);
-    setCurrentPath(null);
     setCompletion(null);
+    await ctxStartOrganize({
+      sources: sources.map((s) => s.path),
+      target,
+      op,
+      granularity: { year, month, day },
+      extensions: settings.organizeFilters.extensions,
+      minSize: settings.organizeFilters.minSize,
+      maxSize: settings.organizeFilters.maxSize,
+      ignoreMacosFiles: settings.organizeFilters.ignoreMacosFiles,
+      writeFilenameDate: settings.organizeFilters.writeFilenameDateMetadata ?? false,
+      skipImagesWithExistingDate:
+        settings.organizeFilters.skipImagesWithExistingDate ?? false,
+    });
+  }, [sources, target, op, year, month, day, settings.organizeFilters.extensions, settings.organizeFilters.minSize, settings.organizeFilters.maxSize, settings.organizeFilters.ignoreMacosFiles, settings.organizeFilters.writeFilenameDateMetadata, settings.organizeFilters.skipImagesWithExistingDate, ctxStartOrganize]);
 
-    const id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `org-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    activeId.current = id;
-
-    try {
-      await invoke<string>('start_organize', {
-        organizeId: id,
-        sources: sources.map((s) => s.path),
-        target,
-        op,
-        granularity: { year, month, day },
-        extensions: settings.organizeFilters.extensions,
-        minSize: settings.organizeFilters.minSize,
-        ignoreMacosFiles: settings.organizeFilters.ignoreMacosFiles,
-      });
-    } catch (err) {
-      console.error('start_organize failed', err);
-      activeId.current = null;
-      setRunning(false);
-      setPhase(null);
-    }
-  }, [sources, target, op, year, month, day, settings.organizeFilters.extensions, settings.organizeFilters.minSize, settings.organizeFilters.ignoreMacosFiles]);
-
-  const cancel = useCallback(async () => {
-    if (!activeId.current) return;
-    try {
-      await invoke('cancel_organize', { organizeId: activeId.current });
-    } catch (err) {
-      console.error('cancel_organize failed', err);
-    }
-  }, []);
+  const cancel = useCallback(() => {
+    void ctxCancelOrganize();
+  }, [ctxCancelOrganize]);
 
   useEffect(() => {
-    let unlistenProgress: UnlistenFn | undefined;
-    let unlistenComplete: UnlistenFn | undefined;
-    let unlistenCollision: UnlistenFn | undefined;
-
-    listen<OrganizeProgressEvent>('organize://progress', (e) => {
-      if (e.payload.organizeId !== activeId.current) return;
-      const p = e.payload.progress;
-      setPhase(p.phase);
-      setProcessed(p.processed);
-      setTotal(p.total);
-      setCurrentPath(p.currentPath);
-    }).then((u) => (unlistenProgress = u));
-
-    listen<OrganizeCompleteEvent>('organize://complete', (e) => {
-      if (e.payload.organizeId !== activeId.current) return;
-      setCompletion(e.payload.result);
-      setRunning(false);
-      setPhase(null);
+    const offComplete = onComplete((result) => {
+      setCompletion(result);
       setCollision(null);
-      activeId.current = null;
-    }).then((u) => (unlistenComplete = u));
-
-    listen<CollisionEvent>('organize://collision', (e) => {
-      if (e.payload.organizeId !== activeId.current) return;
-      setCollision(e.payload);
-    }).then((u) => (unlistenCollision = u));
-
+    });
+    const offCollision = onCollision((e) => {
+      setCollision(e);
+    });
     return () => {
-      unlistenProgress?.();
-      unlistenComplete?.();
-      unlistenCollision?.();
+      offComplete();
+      offCollision();
     };
-  }, []);
-
-  const progressPct = useMemo(() => {
-    if (phase === 'walking') return Math.min(20, 20 * (1 - Math.exp(-processed / 2000)));
-    if (phase === 'organizing') {
-      if (total === 0) return 100;
-      return 20 + (processed / total) * 80;
-    }
-    return 0;
-  }, [phase, processed, total]);
+  }, [onComplete, onCollision]);
 
   // Allow start when extensions = null (all types) OR at least one extension is in the
   // allowlist (covering both built-in chips and named custom types).
@@ -566,39 +485,85 @@ export default function OrganizeView() {
         )}
       </div>
 
-      {/* Progress */}
-      {running && (
-        <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-white text-sm font-medium">
-              {phase === 'walking'
-                ? 'Discovering files'
-                : phase === 'organizing'
-                  ? `${op === 'copy' ? 'Copying' : 'Moving'} files`
-                  : 'Working…'}
+      {/* Date metadata */}
+      <div className="bg-[#3d2418] rounded-2xl border border-white/10 p-5 mb-6">
+        <p className="text-white/30 text-xs font-semibold uppercase tracking-wider mb-3">
+          Date Metadata
+        </p>
+        <label className="flex items-start gap-3 cursor-pointer">
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={settings.organizeFilters.writeFilenameDateMetadata ?? false}
+            disabled={running}
+            onClick={() =>
+              void updateOrganizeFilters({
+                writeFilenameDateMetadata:
+                  !(settings.organizeFilters.writeFilenameDateMetadata ?? false),
+              })
+            }
+            className={`mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded border transition-all duration-200 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed ${
+              settings.organizeFilters.writeFilenameDateMetadata
+                ? 'border-[#f5c542] bg-[#f5c542]/20 text-[#f5c542]'
+                : 'border-white/20 text-transparent hover:border-white/40'
+            }`}
+          >
+            <i className="ri-check-line text-sm leading-none"></i>
+          </button>
+          <span className="flex-1">
+            <span className="block text-white text-sm font-medium">
+              Write parsed filename date into image & video metadata (when missing)
             </span>
-            <span className="text-[#f5c542] text-sm font-semibold">
-              {Math.round(progressPct)}%
+            <span className="block text-white/40 text-[11px] mt-1 leading-relaxed">
+              Affects images and videos that lack a capture-date tag but have
+              a parseable date in their filename (e.g.{' '}
+              <span className="font-mono">2025-02-11.jpg</span>,{' '}
+              <span className="font-mono">2025-02-11.mp4</span>). For images
+              we write EXIF <span className="font-mono">DateTimeOriginal</span>;
+              for videos in the QuickTime / MP4 family (mp4, m4v, mov, qt,
+              3gp, 3g2) we patch the <span className="font-mono">mvhd</span>{' '}
+              and <span className="font-mono">tkhd</span> creation time in
+              place. Files in container formats we can't write into (RAW,
+              BMP, GIF, AVIF, SVG, MKV, WEBM, AVI, FLV, WMV) are routed to{' '}
+              <code className="text-white/60">MetadataWriteFailed/</code> so
+              you can retry them later.
             </span>
-          </div>
-          <div className="h-3 bg-white/10 rounded-full overflow-hidden">
-            <div
-              className="h-full rounded-full bg-[#f5c542] transition-all duration-150"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between mt-3 gap-4">
-            <p className="text-white/40 text-xs font-mono truncate">
-              {currentPath ?? (phase === 'walking' ? 'Walking directories…' : 'Preparing…')}
-            </p>
-            <p className="text-white/40 text-xs font-mono shrink-0">
-              {phase === 'walking'
-                ? `${processed.toLocaleString()} found`
-                : `${processed.toLocaleString()} / ${total.toLocaleString()}`}
-            </p>
-          </div>
-        </div>
-      )}
+          </span>
+        </label>
+        {(settings.organizeFilters.writeFilenameDateMetadata ?? false) && (
+          <label className="flex items-start gap-3 cursor-pointer mt-4 pl-8">
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={settings.organizeFilters.skipImagesWithExistingDate ?? false}
+              disabled={running}
+              onClick={() =>
+                void updateOrganizeFilters({
+                  skipImagesWithExistingDate:
+                    !(settings.organizeFilters.skipImagesWithExistingDate ?? false),
+                })
+              }
+              className={`mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded border transition-all duration-200 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed ${
+                settings.organizeFilters.skipImagesWithExistingDate
+                  ? 'border-[#f5c542] bg-[#f5c542]/20 text-[#f5c542]'
+                  : 'border-white/20 text-transparent hover:border-white/40'
+              }`}
+            >
+              <i className="ri-check-line text-sm leading-none"></i>
+            </button>
+            <span className="flex-1">
+              <span className="block text-white text-sm font-medium">
+                Only process images without date metadata
+              </span>
+              <span className="block text-white/40 text-[11px] mt-1 leading-relaxed">
+                Images that already have a date-taken EXIF tag are left in
+                their source folder and not moved or copied. Videos are
+                unaffected by this option.
+              </span>
+            </span>
+          </label>
+        )}
+      </div>
 
       {/* Completion modal */}
       {completion && (
@@ -636,7 +601,7 @@ function CompletionModal({
   op,
   onClose,
 }: {
-  result: OrganizeCompleteEvent['result'];
+  result: OrganizeCompleteResult;
   op: 'copy' | 'move';
   onClose: () => void;
 }) {
@@ -724,6 +689,35 @@ function CompletionModal({
               <p className="text-white/40 text-xs mt-1">Errors</p>
             </div>
           </div>
+
+          {(result.metadataWritten > 0 || result.metadataWriteFailed > 0) && (
+            <div className="mt-3 bg-[#2c1810] rounded-xl border border-white/10 p-3 flex items-center justify-between gap-3">
+              <div className="flex-1">
+                <p className="text-white/30 text-[10px] font-semibold uppercase tracking-wider">
+                  Date metadata
+                </p>
+                <p className="text-white/70 text-xs mt-1">
+                  {result.metadataWritten > 0 && (
+                    <span>
+                      <span className="text-[#f5c542] font-semibold">
+                        {result.metadataWritten}
+                      </span>{' '}
+                      written
+                    </span>
+                  )}
+                  {result.metadataWritten > 0 && result.metadataWriteFailed > 0 && ' · '}
+                  {result.metadataWriteFailed > 0 && (
+                    <span>
+                      <span className="text-[#c45c5c] font-semibold">
+                        {result.metadataWriteFailed}
+                      </span>{' '}
+                      in <code className="font-mono">MetadataWriteFailed/</code>
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+          )}
 
           <div className="mt-3 bg-[#2c1810] rounded-xl border border-white/10 p-3">
             <p className="text-white/30 text-[10px] font-semibold uppercase tracking-wider mb-1">

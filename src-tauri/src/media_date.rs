@@ -8,9 +8,11 @@ const IMAGE_EXTS: &[&str] = &[
     "pef", "3fr", "iiq", "mef", "x3f", "erf", "raw", "dcr", "kdc", "mrw", "rwl",
 ];
 // Container formats parsed by `read_metadata_ms` (subset of categorized videos).
-const VIDEO_METADATA_EXTS: &[&str] = &["mp4", "m4v", "mov", "3gp", "3g2"];
+const VIDEO_METADATA_EXTS: &[&str] = &["mp4", "m4v", "mov", "qt", "3gp", "3g2"];
 // Full video category — must mirror `videos` preset in filterPresets.ts.
-const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "flv", "wmv", "m4v"];
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mov", "qt", "m4v", "3gp", "3g2", "mkv", "avi", "webm", "flv", "wmv",
+];
 const PDF_EXTS: &[&str] = &["pdf"];
 const AUDIO_EXTS: &[&str] = &["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff"];
 const DOC_EXTS: &[&str] = &["docx", "txt", "rtf", "odt", "doc", "xlsx", "pptx", "csv"];
@@ -351,7 +353,7 @@ pub fn unknown_subfolder_name(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -420,6 +422,56 @@ mod tests {
     }
 
     #[test]
+    fn read_metadata_ms_for_qt_routes_to_mp4_reader() {
+        // .qt is a QuickTime container — must use the same MP4/ISO-BMFF
+        // reader as .mov, not be silently dropped to None on extension.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("clip.qt");
+        // 2024-03-15 12:00:00 UTC → unix secs 1_710_504_000
+        //   → secs-since-1904 = 1_710_504_000 + 2_082_844_800 = 3_793_348_800
+        let secs_1904: u32 = 3_793_348_800;
+        std::fs::write(&path, build_minimal_mp4_v0(secs_1904)).unwrap();
+        assert_eq!(read_metadata_ms(&path), Some(1_710_504_000_000));
+    }
+
+    /// Build the minimum bytes that satisfy `read_mp4_creation_ms`:
+    /// a top-level `moov` box whose first child is a v0 `mvhd` box with
+    /// the given creation_time. Other fields are zeroed.
+    pub(crate) fn build_minimal_mp4_v0(creation_secs_1904: u32) -> Vec<u8> {
+        // mvhd v0 payload = 4 (ver+flags) + 4 (creation) + 4 (modification)
+        //                 + 4 (timescale) + 4 (duration) + 4 (rate)
+        //                 + 2 (volume) + 10 (reserved) + 36 (matrix)
+        //                 + 24 (pre_defined) + 4 (next_track_id) = 100 bytes
+        let mut mvhd_payload = Vec::with_capacity(100);
+        mvhd_payload.extend_from_slice(&[0u8; 4]); // version=0, flags=0
+        mvhd_payload.extend_from_slice(&creation_secs_1904.to_be_bytes()); // creation
+        mvhd_payload.extend_from_slice(&[0u8; 4]); // modification
+        mvhd_payload.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        mvhd_payload.extend_from_slice(&[0u8; 4]); // duration
+        mvhd_payload.extend_from_slice(&[0u8; 4]); // rate
+        mvhd_payload.extend_from_slice(&[0u8; 2]); // volume
+        mvhd_payload.extend_from_slice(&[0u8; 10]); // reserved
+        mvhd_payload.extend_from_slice(&[0u8; 36]); // matrix
+        mvhd_payload.extend_from_slice(&[0u8; 24]); // pre_defined
+        mvhd_payload.extend_from_slice(&[0u8; 4]); // next_track_id
+        assert_eq!(mvhd_payload.len(), 100);
+
+        let mut mvhd_box = Vec::new();
+        let mvhd_size = (8 + mvhd_payload.len()) as u32; // header + payload
+        mvhd_box.extend_from_slice(&mvhd_size.to_be_bytes());
+        mvhd_box.extend_from_slice(b"mvhd");
+        mvhd_box.extend_from_slice(&mvhd_payload);
+
+        let mut moov_box = Vec::new();
+        let moov_size = (8 + mvhd_box.len()) as u32;
+        moov_box.extend_from_slice(&moov_size.to_be_bytes());
+        moov_box.extend_from_slice(b"moov");
+        moov_box.extend_from_slice(&mvhd_box);
+
+        moov_box
+    }
+
+    #[test]
     fn read_metadata_ms_extensionless_returns_none() {
         let path = Path::new("/nonexistent/no_ext");
         assert!(read_metadata_ms(path).is_none());
@@ -454,6 +506,24 @@ mod tests {
     fn filename_date_with_separated_time() {
         let ms = parse_filename_date_ms("2025-02-11T14-30-15").unwrap();
         assert_eq!(ms, civil_to_unix_ms(2025, 2, 11, 14, 30, 15).unwrap());
+    }
+
+    #[test]
+    fn filename_date_space_separator_underscore_time_with_tz_suffix() {
+        // Real-world example: dashes in date, space separator, underscores in
+        // time, trailing " +0000" timezone marker. The parser should match the
+        // first 19 chars (date + space + HH_MM_SS) and ignore the rest.
+        let ms = parse_filename_date_ms("2018-10-07 00_32_48 +0000").unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2018, 10, 7, 0, 32, 48).unwrap());
+    }
+
+    #[test]
+    fn read_filename_date_ms_handles_gif_with_space_and_tz() {
+        // Same case exercised via the path-taking entry point — this is the
+        // form actually called from organize.rs.
+        let path = Path::new("/x/2018-10-07 00_32_48 +0000.gif");
+        let ms = read_filename_date_ms(path).unwrap();
+        assert_eq!(ms, civil_to_unix_ms(2018, 10, 7, 0, 32, 48).unwrap());
     }
 
     #[test]
@@ -502,6 +572,10 @@ mod tests {
         assert_eq!(file_category(Path::new("/x/clip.mp4")), FileCategory::Video);
         assert_eq!(file_category(Path::new("/x/clip.mkv")), FileCategory::Video);
         assert_eq!(file_category(Path::new("/x/clip.WEBM")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.qt")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.QT")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.3gp")), FileCategory::Video);
+        assert_eq!(file_category(Path::new("/x/clip.3g2")), FileCategory::Video);
         assert_eq!(file_category(Path::new("/x/doc.pdf")), FileCategory::Pdf);
         assert_eq!(file_category(Path::new("/x/song.mp3")), FileCategory::Audio);
         assert_eq!(file_category(Path::new("/x/song.FLAC")), FileCategory::Audio);
