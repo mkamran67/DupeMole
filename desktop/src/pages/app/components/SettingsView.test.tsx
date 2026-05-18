@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import { getVersion } from '@tauri-apps/api/app';
 import SettingsView from './SettingsView';
 import { SettingsProvider } from '../../../settings/SettingsContext';
 
@@ -21,5 +22,13 @@ describe('SettingsView', () => {
     renderView();
     expect(screen.getByText('Notifications')).toBeInTheDocument();
     expect(screen.getByText('Auto Scan on Launch')).toBeInTheDocument();
+  });
+
+  it('shows the version returned by Tauri getVersion()', async () => {
+    vi.mocked(getVersion).mockResolvedValueOnce('1.2.3');
+    renderView();
+    await waitFor(() => {
+      expect(screen.getByText('Version 1.2.3 • macOS & Linux')).toBeInTheDocument();
+    });
   });
 });

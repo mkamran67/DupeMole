@@ -80,6 +80,7 @@ pub struct AnalysisProgress {
     pub folder_index: u32,
     pub folder_total: u32,
     pub folder_path: PathBuf,
+    pub folder_processed: u64,
 }
 
 pub struct CancelToken(pub Arc<AtomicBool>);
@@ -261,6 +262,7 @@ where
         let ignored_folders = ignored_folders_lower.clone();
         let mut last_emit = Instant::now();
         let mut visited: u64 = 0;
+        let mut folder_processed: u64 = 0;
 
         let iter = walker.into_iter().filter_entry(move |e| {
             let name = e.file_name().to_str().unwrap_or("");
@@ -296,6 +298,7 @@ where
             }
 
             total_files += 1;
+            folder_processed += 1;
             total_bytes = total_bytes.saturating_add(size);
             sizes.push(size);
 
@@ -333,9 +336,22 @@ where
                     folder_index,
                     folder_total,
                     folder_path: root.clone(),
+                    folder_processed,
                 });
             }
         }
+
+        // Final per-folder emit so the frontend's count reflects the folder's
+        // true total even when the last in-loop emit landed before the last file
+        // (or for small folders that never tripped the throttled emit).
+        on_progress(AnalysisProgress {
+            processed: total_files,
+            current_path: None,
+            folder_index,
+            folder_total,
+            folder_path: root.clone(),
+            folder_processed,
+        });
     }
 
     let average_bytes = if total_files == 0 { 0 } else { total_bytes / total_files };
@@ -528,6 +544,64 @@ mod tests {
         assert_eq!(r.smallest_file.as_ref().unwrap().size, 10);
         assert_eq!(r.median_bytes, 100);
         assert_eq!(r.average_bytes, (10 + 100 + 1000) / 3);
+    }
+
+    use std::sync::Mutex;
+
+    #[test]
+    fn progress_folder_processed_resets_per_folder() {
+        let dir_a = tempdir();
+        write_file(&dir_a.join("a1.txt"), b"x");
+        write_file(&dir_a.join("a2.txt"), b"y");
+        write_file(&dir_a.join("a3.txt"), b"z");
+        let dir_b = tempdir();
+        write_file(&dir_b.join("b1.txt"), b"x");
+
+        let events: Mutex<Vec<AnalysisProgress>> = Mutex::new(Vec::new());
+        run_analysis(
+            vec![dir_a.clone(), dir_b.clone()],
+            &s(),
+            &CancelToken::new(),
+            |p| events.lock().unwrap().push(p),
+        );
+        let events = events.into_inner().unwrap();
+
+        let final_a = events.iter().rev().find(|p| p.folder_path == dir_a).unwrap();
+        let final_b = events.iter().rev().find(|p| p.folder_path == dir_b).unwrap();
+        assert_eq!(final_a.folder_processed, 3);
+        assert_eq!(final_b.folder_processed, 1);
+        // global processed keeps climbing across folders
+        assert_eq!(final_b.processed, 4);
+    }
+
+    #[test]
+    fn empty_folder_emits_zero_final_progress() {
+        let dir = tempdir();
+        let events: Mutex<Vec<AnalysisProgress>> = Mutex::new(Vec::new());
+        run_analysis(vec![dir.clone()], &s(), &CancelToken::new(), |p| {
+            events.lock().unwrap().push(p)
+        });
+        let events = events.into_inner().unwrap();
+        let final_event = events.iter().rev().find(|p| p.folder_path == dir).unwrap();
+        assert_eq!(final_event.folder_processed, 0);
+    }
+
+    #[test]
+    fn filtered_files_do_not_increment_folder_processed() {
+        let dir = tempdir();
+        write_file(&dir.join("a.txt"), b"a");
+        write_file(&dir.join("b.log"), b"b");
+        write_file(&dir.join("c.log"), b"c");
+        let mut settings = s();
+        settings.ignored_extensions = vec!["log".into()];
+
+        let events: Mutex<Vec<AnalysisProgress>> = Mutex::new(Vec::new());
+        run_analysis(vec![dir.clone()], &settings, &CancelToken::new(), |p| {
+            events.lock().unwrap().push(p)
+        });
+        let events = events.into_inner().unwrap();
+        let final_event = events.iter().rev().find(|p| p.folder_path == dir).unwrap();
+        assert_eq!(final_event.folder_processed, 1);
     }
 
     #[test]

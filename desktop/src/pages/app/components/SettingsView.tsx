@@ -1,3 +1,4 @@
+import { useAppVersion } from '../../../lib/useAppVersion';
 import { isMacos, useSettings, type AppSettings, type ScanThreads } from '../../../settings/SettingsContext';
 
 interface SettingItem {
@@ -101,6 +102,7 @@ function stringToScanThreads(s: string): ScanThreads {
 
 export default function SettingsView() {
   const { settings: values, updateSettings } = useSettings();
+  const version = useAppVersion();
 
   const readValue = (id: string): boolean | string => {
     const key = idToKey[id];
@@ -181,7 +183,7 @@ export default function SettingsView() {
         <div className="mt-6 bg-[#3d2418] rounded-2xl border border-white/10 p-5 flex items-center justify-between">
           <div>
             <p className="text-white text-sm font-medium">DupeMole</p>
-            <p className="text-white/30 text-xs mt-0.5">Version 1.0.0 &bull; macOS & Linux</p>
+            <p className="text-white/30 text-xs mt-0.5">Version {version ?? '…'} &bull; macOS & Linux</p>
           </div>
           <button className="text-xs font-medium text-[#f5c542] hover:text-[#e0b038] transition-colors duration-200 cursor-pointer whitespace-nowrap">
             Check for Updates

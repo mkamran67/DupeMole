@@ -57,6 +57,8 @@ interface AnalysisProgressEvent {
     currentPath: string | null;
     folderIndex: number;
     folderTotal: number;
+    folderPath: string;
+    folderProcessed: number;
   };
 }
 
@@ -124,6 +126,7 @@ export default function AnalysisView() {
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [processed, setProcessed] = useState(0);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
+  const [folderCounts, setFolderCounts] = useState<Record<string, number>>({});
   const activeId = useRef<string | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
 
@@ -138,8 +141,12 @@ export default function AnalysisView() {
     let unlistenComplete: UnlistenFn | undefined;
     listen<AnalysisProgressEvent>('analysis://progress', (e) => {
       if (e.payload.analysisId !== activeId.current) return;
-      setProcessed(e.payload.progress.processed);
-      setCurrentPath(e.payload.progress.currentPath);
+      const { processed, currentPath, folderPath, folderProcessed } = e.payload.progress;
+      setProcessed(processed);
+      setCurrentPath(currentPath);
+      setFolderCounts((prev) =>
+        prev[folderPath] === folderProcessed ? prev : { ...prev, [folderPath]: folderProcessed },
+      );
     }).then((u) => (unlistenProgress = u));
     listen<AnalysisCompleteEvent>('analysis://complete', (e) => {
       if (e.payload.analysisId !== activeId.current) return;
@@ -188,6 +195,7 @@ export default function AnalysisView() {
     setReport(null);
     setProcessed(0);
     setCurrentPath(null);
+    setFolderCounts({});
     const id =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
@@ -280,7 +288,7 @@ export default function AnalysisView() {
               <DirectoryRow
                 key={dir.id}
                 name={dir.name}
-                files={0}
+                files={folderCounts[dir.path] ?? 0}
                 progress={analyzing ? 50 : report ? 100 : 0}
                 scanned={!analyzing && !!report}
                 scanning={analyzing}

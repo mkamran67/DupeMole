@@ -1,4 +1,8 @@
+import { useAppVersion } from '../../../lib/useAppVersion';
+
 export default function AboutView() {
+  const version = useAppVersion();
+
   return (
     <div className="max-w-2xl mx-auto py-10">
       <div className="flex items-center gap-4 mb-8">
@@ -25,7 +29,7 @@ export default function AboutView() {
 
         <section>
           <h2 className="text-white font-semibold text-base mb-2">Version</h2>
-          <p className="font-mono text-white/60">0.0.0</p>
+          <p className="font-mono text-white/60">{version ?? '…'}</p>
         </section>
 
         <section>

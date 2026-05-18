@@ -11,7 +11,7 @@
   [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
   [![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
   [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#installation)
-  [![Version](https://img.shields.io/badge/version-0.3.0-blue)](releases/)
+  [![Version](https://img.shields.io/badge/version-0.5.1-blue)](releases/)
 </div>
 
 ---
@@ -34,18 +34,18 @@ Pre-built Linux binaries are published in [`releases/`](releases/):
 
 | Format | File |
 |---|---|
-| AppImage | `DupeMole_0.3.0_amd64.AppImage` |
-| Debian / Ubuntu | `DupeMole_0.3.0_amd64.deb` |
+| AppImage | `DupeMole_0.5.1_amd64.AppImage` |
+| Debian / Ubuntu | `DupeMole_0.5.1_amd64.deb` |
 
 **AppImage:**
 ```bash
-chmod +x DupeMole_0.3.0_amd64.AppImage
-./DupeMole_0.3.0_amd64.AppImage
+chmod +x DupeMole_0.5.1_amd64.AppImage
+./DupeMole_0.5.1_amd64.AppImage
 ```
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i DupeMole_0.3.0_amd64.deb
+sudo dpkg -i DupeMole_0.5.1_amd64.deb
 ```
 
 macOS and Windows builds are not currently published as artifacts — see [Building from source](#building-from-source) below.
@@ -108,6 +108,8 @@ npm run release
 ```
 
 The `release.mjs` script builds and stages versioned artifacts into `releases/`.
+By default it bumps the patch version first; pass `--no-bump` to rebuild the
+current version.
 
 ## Project layout
 

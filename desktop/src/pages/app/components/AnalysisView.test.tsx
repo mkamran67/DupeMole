@@ -47,9 +47,11 @@ interface CompleteHandler {
 }
 
 let completeHandler: CompleteHandler | null = null;
+let progressHandler: CompleteHandler | null = null;
 
 beforeEach(() => {
   completeHandler = null;
+  progressHandler = null;
   mockUseSettings.mockReturnValue({
     settings: defaultSettings,
     loaded: true,
@@ -64,6 +66,8 @@ beforeEach(() => {
   vi.mocked(listen).mockImplementation(async (event, handler) => {
     if (event === 'analysis://complete') {
       completeHandler = handler as CompleteHandler;
+    } else if (event === 'analysis://progress') {
+      progressHandler = handler as CompleteHandler;
     }
     return () => undefined;
   });
@@ -181,6 +185,98 @@ describe('AnalysisView', () => {
     const lastCall = calls[calls.length - 1][0];
     expect(lastCall.ignoredExtensions).toBeDefined();
     expect((lastCall.ignoredExtensions as string[]).length).toBeGreaterThan(0);
+  });
+
+  it('updates per-folder file counts from progress events while scanning', async () => {
+    const user = userEvent.setup();
+    vi.mocked(openDialog).mockResolvedValueOnce('/tmp/folder-a');
+    vi.mocked(openDialog).mockResolvedValueOnce('/tmp/folder-b');
+    renderView();
+    await user.click(screen.getByRole('button', { name: /add folder/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await user.click(screen.getByRole('button', { name: /add folder/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await user.click(screen.getByRole('button', { name: /start analysis/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(progressHandler).not.toBeNull();
+    await act(async () => {
+      progressHandler!({
+        payload: {
+          analysisId: 'analysis-id-1',
+          progress: {
+            processed: 5,
+            currentPath: '/tmp/folder-a/x',
+            folderIndex: 0,
+            folderTotal: 2,
+            folderPath: '/tmp/folder-a',
+            folderProcessed: 5,
+          },
+        },
+      });
+      progressHandler!({
+        payload: {
+          analysisId: 'analysis-id-1',
+          progress: {
+            processed: 8,
+            currentPath: '/tmp/folder-b/y',
+            folderIndex: 1,
+            folderTotal: 2,
+            folderPath: '/tmp/folder-b',
+            folderProcessed: 3,
+          },
+        },
+      });
+    });
+
+    // Each row shows its own folder's count, independently.
+    expect(screen.getByText('5 files')).toBeInTheDocument();
+    expect(screen.getByText('3 files')).toBeInTheDocument();
+  });
+
+  it('resets per-folder counts when a new analysis starts', async () => {
+    const user = userEvent.setup();
+    vi.mocked(openDialog).mockResolvedValue('/tmp/folder-a');
+    renderView();
+    await user.click(screen.getByRole('button', { name: /add folder/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await user.click(screen.getByRole('button', { name: /start analysis/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    await act(async () => {
+      progressHandler!({
+        payload: {
+          analysisId: 'analysis-id-1',
+          progress: {
+            processed: 7,
+            currentPath: '/tmp/folder-a/x',
+            folderIndex: 0,
+            folderTotal: 1,
+            folderPath: '/tmp/folder-a',
+            folderProcessed: 7,
+          },
+        },
+      });
+    });
+    expect(screen.getByText('7 files')).toBeInTheDocument();
+
+    // Complete and start again — count must reset to 0 before any new events.
+    await act(async () => {
+      completeHandler!({
+        payload: {
+          analysisId: 'analysis-id-1',
+          report: {
+            totalFiles: 7, totalBytes: 70, largestFile: null, smallestFile: null,
+            averageBytes: 10, medianBytes: 10, oldestModifiedMs: null, newestModifiedMs: null,
+            extensions: [], sizeBuckets: [], ageBuckets: [],
+          },
+        },
+      });
+    });
+    await user.click(screen.getByRole('button', { name: /start analysis/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('0 files')).toBeInTheDocument();
+    expect(screen.queryByText('7 files')).not.toBeInTheDocument();
   });
 
   it('invokes cancel_analysis from the cancel button while running', async () => {

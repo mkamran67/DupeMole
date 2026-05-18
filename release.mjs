@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Production release script for DupeMole.
 //
-//   node release.mjs                       build a release for the host OS
-//   node release.mjs --patch               bump patch version, then release
+//   node release.mjs                       bump patch version, then release
+//   node release.mjs --no-bump             release the current version
+//   node release.mjs --minor               bump minor version, then release
 //   node release.mjs --skip-notarize       (macOS) sign but do not notarize
 //   node release.mjs --targets=appimage    override default bundle targets
 //
@@ -26,13 +27,21 @@ function fail(msg) {
 }
 
 function parseArgs(argv) {
-  let bump = null;
+  let bump = "patch";
+  let explicitBump = false;
   let skipNotarize = false;
   let targets = null;
+  let noBump = false;
   for (const arg of argv.slice(2)) {
     if (arg === "--major" || arg === "--minor" || arg === "--patch") {
-      if (bump) fail("pick at most one of --major / --minor / --patch");
+      if (noBump) fail("pick either --no-bump or one of --major / --minor / --patch");
+      if (explicitBump) fail("pick at most one of --major / --minor / --patch");
       bump = arg.slice(2);
+      explicitBump = true;
+    } else if (arg === "--no-bump") {
+      if (explicitBump) fail("pick either --no-bump or one of --major / --minor / --patch");
+      noBump = true;
+      bump = null;
     } else if (arg === "--skip-notarize") {
       skipNotarize = true;
     } else if (arg.startsWith("--targets=")) {

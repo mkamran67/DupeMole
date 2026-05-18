@@ -7,6 +7,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async () => undefined),
 }));
 
+vi.mock('@tauri-apps/api/app', () => ({
+  getVersion: vi.fn(async () => '0.0.0-test'),
+  getName: vi.fn(async () => 'dupemole'),
+  getTauriVersion: vi.fn(async () => '2.0.0-test'),
+}));
+
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => undefined),
   emit: vi.fn(async () => undefined),
